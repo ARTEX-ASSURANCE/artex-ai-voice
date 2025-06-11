@@ -26,7 +26,7 @@ class Adherent(Base):
 
     # Relationships
     contrats_adherent_principal: Mapped[List["Contrat"]] = relationship(back_populates="adherent_principal")
-    sinistres_arthex: Mapped[List["SinistreArthex"]] = relationship(back_populates="adherent")
+    sinistres_artex: Mapped[List["SinistreArtex"]] = relationship(back_populates="adherent")
 
 # Formules_Garanties Association Table
 formules_garanties_association = Table(
@@ -83,23 +83,23 @@ class Contrat(Base):
 
     adherent_principal: Mapped["Adherent"] = relationship(back_populates="contrats_adherent_principal")
     formule: Mapped[Optional["Formule"]] = relationship(back_populates="contrats")
-    sinistres_arthex: Mapped[List["SinistreArthex"]] = relationship(back_populates="contrat")
+    sinistres_artex: Mapped[List["SinistreArtex"]] = relationship(back_populates="contrat")
 
-# New SinistreArthex Table
-class SinistreArthex(Base):
-    __tablename__ = "sinistres_arthex"
+# New SinistreArtex Table
+class SinistreArtex(Base): # Renamed class
+    __tablename__ = "sinistres_artex" # Renamed table
 
-    id_sinistre_arthex: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    id_contrat: Mapped[int] = mapped_column(Integer, ForeignKey("contrats.id_contrat", name="fk_sinistre_arthex_contrat_id"))
-    id_adherent: Mapped[int] = mapped_column(Integer, ForeignKey("adherents.id_adherent", name="fk_sinistre_arthex_adherent_id"))
-    type_sinistre: Mapped[str] = mapped_column(String(255), comment="Type of claim as categorized by Arthex or user")
+    id_sinistre_artex: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True) # Renamed PK field
+    id_contrat: Mapped[int] = mapped_column(Integer, ForeignKey("contrats.id_contrat", name="fk_sinistre_artex_contrat_id")) # Updated FK name
+    id_adherent: Mapped[int] = mapped_column(Integer, ForeignKey("adherents.id_adherent", name="fk_sinistre_artex_adherent_id")) # Updated FK name
+    type_sinistre: Mapped[str] = mapped_column(String(255), comment="Type of claim as categorized by Artex or user")
     description_sinistre: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     date_declaration_agent: Mapped[datetime.date] = mapped_column(Date, server_default=func.current_date())
-    statut_sinistre_arthex: Mapped[str] = mapped_column(String(100), server_default="Information enregistrée par agent", default="Information enregistrée par agent")
+    statut_sinistre_arthex: Mapped[str] = mapped_column(String(100), server_default="Information enregistrée par agent", default="Information enregistrée par agent") # Field name "statut_sinistre_arthex" can remain if it's just a descriptive string not a direct FK or class name. Let's assume this is fine.
     date_survenance: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True, comment="Date of incident, if provided by user")
 
-    contrat: Mapped["Contrat"] = relationship(back_populates="sinistres_arthex")
-    adherent: Mapped["Adherent"] = relationship(back_populates="sinistres_arthex")
+    contrat: Mapped["Contrat"] = relationship(back_populates="sinistres_artex") # Updated back_populates target
+    adherent: Mapped["Adherent"] = relationship(back_populates="sinistres_artex") # Updated back_populates target
 
 # Removed old UserPreference as it's not in the new schema.
 # If needed, it can be added back. For now, focusing on the provided schema.

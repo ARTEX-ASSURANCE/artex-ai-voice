@@ -1,5 +1,6 @@
 # Standard library imports
 import os
+import sys # Added import
 import asyncio
 import tempfile
 import time
@@ -36,27 +37,44 @@ log = get_logger(__name__) # Logger for this module (agent.py)
 
 
 # --- Prompt Loading ---
-def load_prompt(file_name: str) -> str:
+DEFAULT_SYSTEM_PROMPT = (
+    "Tu es un assistant virtuel pour ARTEX ASSURANCES, nommé Jules.\n"
+    "Réponds en français. Sois professionnel et amical.\n"
+    "Si une question est ambiguë, demande des précisions en commençant ta réponse par '[CLARIFY]'.\n"
+    "Si tu ne peux pas répondre ou si l'utilisateur veut parler à un humain, commence ta réponse par '[HANDOFF]'."
+)
+
+def load_prompt(file_name: str, default_prompt: str = DEFAULT_SYSTEM_PROMPT) -> str:
+    # Assuming agent.py is in artex_agent/src/
+    # So, __file__ is .../artex_agent/src/agent.py
+    # os.path.dirname(__file__) is .../artex_agent/src/
+    # os.path.join(os.path.dirname(__file__), '..', 'prompts') is .../artex_agent/prompts/
     prompt_dir = os.path.join(os.path.dirname(__file__), '..', 'prompts')
     file_path = os.path.join(prompt_dir, file_name)
+
+    # Ensure this print goes to stderr if it's for debugging the loading process itself
+    # print(f"DEBUG: Attempting to load prompt from: {file_path}", file=sys.stderr)
+
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            return f.read().strip()
+            content = f.read().strip()
+        if not content:
+            print(f"CRITICAL WARNING: Prompt file {file_path} is empty. Using default system prompt.", file=sys.stderr)
+            # In future, use structlog: log.warning("Prompt file empty...", path=file_path)
+            return default_prompt
+        return content
     except FileNotFoundError:
-        log.error(f"Prompt file not found.", path=file_path, exc_info=True)
-        if file_name == "system_context.txt":
-             raise SystemExit(f"CRITICAL: System context prompt {file_path} not found.")
-        return ""
+        print(f"CRITICAL WARNING: Prompt file {file_path} not found! Using default system prompt. THIS IS A CONFIGURATION ISSUE.", file=sys.stderr)
+        # In future, use structlog: log.critical("Prompt file not found...", path=file_path)
+        return default_prompt
     except Exception as e:
-        log.error(f"Failed to load prompt.", path=file_path, error=str(e), exc_info=True)
-        if file_name == "system_context.txt":
-             raise SystemExit(f"CRITICAL: Failed to load system context prompt {file_path}: {e}")
-        return ""
+        print(f"ERROR: Error loading prompt file {file_path}: {e}. Using default system prompt.", file=sys.stderr)
+        # In future, use structlog: log.error("Error loading prompt file", path=file_path, error=str(e), exc_info=True)
+        return default_prompt
 
-ARTEX_SYSTEM_PROMPT = load_prompt("system_context.txt")
-if not ARTEX_SYSTEM_PROMPT:
-    log.critical("ARTEX_SYSTEM_PROMPT could not be loaded. Exiting.")
-    # SystemExit would have occurred in load_prompt
+# Existing global ARTEX_SYSTEM_PROMPT initialization should be updated to use this:
+ARTEX_SYSTEM_PROMPT = load_prompt("system_context.txt") # Implicitly uses new DEFAULT_SYSTEM_PROMPT
+# The if not ARTEX_SYSTEM_PROMPT check is removed as load_prompt now always returns a string.
 
 # --- Global Instances ---
 db_engine = None
@@ -171,6 +189,7 @@ def speak_text_output(text_to_speak: str):
 
     if not tts_service_global:
         log.error("TTS Service not available. Cannot speak.")
+        # User-facing print remains if TTS is utterly broken, but primary output is via log.
         print(f"Agent (ARTEX) (fallback print): {text_to_speak}")
         return
 
@@ -178,7 +197,8 @@ def speak_text_output(text_to_speak: str):
     try:
         mp3_filepath = asyncio.run(tts_service_global.get_speech_audio_filepath(text_to_speak))
     except Exception as e:
-        log.error("Error getting speech audio filepath from TTSService.", error=str(e), exc_info=True)
+        log.error("Error getting speech audio filepath from TTSService.", error_str=str(e), exc_info=True) # Use error_str for consistency
+        # User-facing print remains if TTS is utterly broken
         print(f"Agent (ARTEX) (fallback print after TTS error): {text_to_speak}")
         return
 
@@ -211,11 +231,11 @@ async def main_async_logic():
             livekit_event_handler_task = asyncio.create_task(livekit_integration.handle_room_events(livekit_room_instance))
             input_mode = "text"
             # User-facing print:
-            print("Agent en mode LiveKit. Saisie vocale simulée par entrée texte.")
+            print("Agent en mode LiveKit. Saisie vocale simulée par entrée texte.") # User-facing, keep
         else:
-            log.error(f"Could not join LiveKit room.", room_name=args.livekit_room)
+            log.error("Could not join LiveKit room.", room_name=args.livekit_room)
             # User-facing print:
-            print(f"Impossible de rejoindre la room LiveKit: {args.livekit_room}. Retour au mode CLI.")
+            print(f"Impossible de rejoindre la room LiveKit: {args.livekit_room}. Retour au mode CLI.") # User-facing, keep
     run_cli_conversation_loop()
 
 def run_cli_conversation_loop():
@@ -321,9 +341,10 @@ def run_cli_conversation_loop():
         if function_call_to_process:
             tool_name = function_call_to_process.name
             tool_args = dict(function_call_to_process.args)
-            log.info(f"Gemini Function Call triggered.", tool_name=tool_name, tool_args=tool_args)
-            # User-facing DEBUG print:
-            print(f"DEBUG: Gemini Function Call: {tool_name} with args {tool_args}")
+            log.info("Gemini Function Call triggered.", tool_name=tool_name, tool_args=tool_args)
+            # User-facing DEBUG print, changed to log.debug for internal visibility.
+            # If truly for user, it would be a different format or a specific user debug mode.
+            log.debug("Gemini Function Call details for agent operator.", tool_name=tool_name, tool_args=str(tool_args)) # Convert tool_args to str if it can be complex
 
             current_conversation_history.append({'role': 'model', 'parts': [Part(function_call=function_call_to_process)]})
             function_response_content = {"error": f"Outil {tool_name} inconnu ou non implémenté."}
@@ -374,11 +395,16 @@ def run_cli_conversation_loop():
                                 return {"id_sinistre_arthex": new_sinistre.id_sinistre_arthex, "claim_id_ref": new_sinistre.claim_id_ref, "message": "Déclaration enregistrée."}
                             return {"error": f"Contrat {numero_contrat} non trouvé."}
                     try: function_response_content = asyncio.run(_open_claim_op())
-                    except Exception as e: function_response_content = {"error": f"Erreur interne ouverture sinistre: {e}"}
-                else: function_response_content = {"error": "Infos manquantes pour ouvrir sinistre."}
+                    except Exception as e:
+                        log.error("Error executing open_claim tool", error_str=str(e), exc_info=True)
+                        function_response_content = {"error": f"Erreur interne ouverture sinistre: {e}"}
+                else:
+                    log.warn("Missing required arguments for open_claim tool.", provided_args=str(tool_args))
+                    function_response_content = {"error": "Infos manquantes pour ouvrir sinistre."}
 
             current_conversation_history.append({'role': 'function', 'parts': [Part(function_response={"name": tool_name, "response": function_response_content})]})
-            print(f"Agent (ARTEX): ...pense (après outil {tool_name})...")
+            log.info("Agent thinking (after tool execution)...", tool_name=tool_name) # Replaces user-facing print
+            # User-facing print: print(f"Agent (ARTEX): ...pense (après outil {tool_name})...") # Kept for user feedback
             final_gemini_response_obj = asyncio.run(generate_agent_response(current_conversation_history))
             if isinstance(final_gemini_response_obj, str): agent_response_text = final_gemini_response_obj
             elif final_gemini_response_obj.text: agent_response_text = final_gemini_response_obj.text
@@ -388,46 +414,63 @@ def run_cli_conversation_loop():
         agent_response = agent_response_text
         if agent_response.startswith("[HANDOFF]"):
             handoff_msg = agent_response.replace("[HANDOFF]", "").strip() or "Je vous mets en relation avec un conseiller."
+            # User-facing prints, keep:
             print(f"Agent (ARTEX): {handoff_msg}"); speak_text_output(handoff_msg)
+            log.info("Conversation ended due to HANDOFF signal.", handoff_message=handoff_msg)
             print("Conversation terminée (handoff)."); break
         elif agent_response.startswith("[CLARIFY]"):
             clarify_q = agent_response.replace("[CLARIFY]", "").strip()
+            # User-facing prints, keep:
             print(f"Agent (ARTEX) précisions: {clarify_q}"); speak_text_output(clarify_q)
+            log.info("Clarification requested by agent.", question=clarify_q)
             current_conversation_history.append({'role': 'model', 'parts': [{'text': agent_response}]})
-            user_clarification = None; current_clar_mode = input_mode
+            user_clarification = None; current_clar_mode = input_mode # These are user-facing prompts/interactions
             if livekit_room_instance:
                  print("Clarification (LiveKit - Sim):"); user_clarification = input(f"Vous ({args.livekit_identity_cli_prompt if args else 'User'} - précision): ")
             elif current_clar_mode == "voice":
-                # ... (voice clarification input logic as before) ...
                 print("Veuillez fournir votre précision oralement:")
                 async def get_clar_input():
                     async for text_res in asr_service_global.listen_for_speech(): return text_res
                     return None
                 user_clarification = asyncio.run(get_clar_input())
-                if not user_clarification or user_clarification.startswith("[ASR_"): # Simplified error check
-                    print("Agent: Non compris. Essayez texte?"); user_clarification = None # Fallback or retry
-            if not user_clarification and (current_clar_mode == "text" or (livekit_room_instance and not user_clarification)): # Prompt if still no clarification
+                if not user_clarification or user_clarification.startswith("[ASR_"):
+                    print("Agent: Non compris. Essayez texte?"); user_clarification = None
+            if not user_clarification and (current_clar_mode == "text" or (livekit_room_instance and not user_clarification)):
                  user_clarification = input(f"Vous (précision texte): ")
 
             if user_clarification:
+                log.info("User provided clarification.", clarification_text=user_clarification)
                 current_conversation_history.append({'role': 'user', 'parts': [{'text': user_clarification}]})
-                print("Agent (ARTEX): ...pense (avec précision)...")
+                # User-facing print, keep: print("Agent (ARTEX): ...pense (avec précision)...")
+                log.info("Agent thinking (with clarification)...")
                 clar_response_obj = asyncio.run(generate_agent_response(current_conversation_history))
-                # ... (process clar_response_obj for HANDOFF/CLARIFY or final text) ...
                 final_text = ""
                 if isinstance(clar_response_obj, str): final_text = clar_response_obj
                 elif clar_response_obj.text: final_text = clar_response_obj.text
-                else: final_text = "[GEMINI_NO_TEXT_POST_CLARIFY]"
+                else: final_text = "[GEMINI_NO_TEXT_POST_CLARIFY]"; log.warn("Gemini returned no text after clarification.")
 
-                if final_text.startswith("[HANDOFF]"): print(f"Agent: {final_text}"); speak_text_output(final_text); break
-                elif final_text.startswith("[CLARIFY]"): print(f"Agent: Encore besoin de détails, transfert."); speak_text_output("Transfert conseiller."); break
-                else: print(f"Agent (ARTEX) (texte): {final_text}"); speak_text_output(final_text)
+                if final_text.startswith("[HANDOFF]"):
+                    # User-facing print, keep:
+                    print(f"Agent: {final_text}"); speak_text_output(final_text)
+                    log.info("Conversation ended due to HANDOFF after clarification.", handoff_message=final_text)
+                    break
+                elif final_text.startswith("[CLARIFY]"):
+                    # User-facing print, keep:
+                    print(f"Agent: Encore besoin de détails, transfert."); speak_text_output("Transfert conseiller.")
+                    log.info("Further clarification needed, initiating handoff.", agent_message=final_text)
+                    break
+                else:
+                    # User-facing print, keep:
+                    print(f"Agent (ARTEX) (texte): {final_text}"); speak_text_output(final_text)
                 current_conversation_history = []
             else:
                 no_clar_msg="Agent (ARTEX): Pas de précision."
+                # User-facing print, keep:
                 print(no_clar_msg); speak_text_output(no_clar_msg)
-                current_conversation_history = [] # Reset after failed clarification
+                log.info("User provided no clarification.")
+                current_conversation_history = []
         else:
+            # User-facing print, keep:
             print(f"Agent (ARTEX) (texte): {agent_response}"); speak_text_output(agent_response)
             current_conversation_history.append({'role': 'model', 'parts': [{'text': agent_response}]})
 
@@ -440,25 +483,52 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print("Bonjour! Je suis l'assistant IA d'ARTEX ASSURANCES. Comment puis-je vous aider?")
+    # User-facing prints, keep:
+    print("Bonjour! Je suis l'assistant IA d'ARTEX ASSURANCES. Comment puis-je vous aider?")
     print("==================================================================================")
 
     _pygame_mixer_initialized = False
     try:
+        log.info("CLI Agent starting...")
         configure_services()
         asyncio.run(main_async_logic())
-    except ValueError as ve: print(f"Erreur de configuration: {ve}")
-    except KeyboardInterrupt: print("\nAu revoir!")
-    except Exception as e: print(f"Une erreur inattendue est survenue: {e}")
+    except ValueError as ve:
+        log.error("Configuration error in CLI agent.", error_str=str(ve), exc_info=True)
+        print(f"Erreur de configuration: {ve}") # User-facing
+    except KeyboardInterrupt:
+        log.info("CLI Agent interrupted by user (KeyboardInterrupt).")
+        print("\nAu revoir!") # User-facing
+    except Exception as e:
+        log.critical("Unhandled exception in CLI agent main loop.", error_str=str(e), exc_info=True)
+        print(f"Une erreur inattendue est survenue: {e}") # User-facing
     finally:
+        log.info("CLI Agent shutting down...")
         if livekit_event_handler_task and not livekit_event_handler_task.done():
-            print("Cancelling LiveKit event handler task..."); livekit_event_handler_task.cancel()
-            try: asyncio.run(asyncio.sleep(0.1))
-            except RuntimeError: pass
-        if livekit_room_instance and livekit_room_instance.connection_state == "connected":
-            print("Disconnecting from LiveKit room..."); asyncio.run(livekit_room_instance.disconnect())
-            print("LiveKit room disconnected.")
-        if livekit_room_service_client:
-            print("Closing LiveKit service client..."); asyncio.run(livekit_room_service_client.close())
-            print("LiveKit service client closed.")
-        if _pygame_mixer_initialized: pygame.mixer.quit()
-        pygame.quit(); print("Application terminée.")
+            log.info("Cancelling LiveKit event handler task...")
+            livekit_event_handler_task.cancel()
+            try: asyncio.run(asyncio.sleep(0.1)) # Allow cancellation to propagate
+            except RuntimeError as r_err:
+                log.warn("RuntimeError during LiveKit task cancellation sleep (likely event loop closed).", error_str=str(r_err))
+            log.info("LiveKit event handler task cancelled.")
+        if livekit_room_instance and hasattr(livekit_room_instance, 'connection_state') and livekit_room_instance.connection_state == "connected": # Check connection_state if available
+            log.info("Disconnecting from LiveKit room...")
+            try:
+                asyncio.run(livekit_room_instance.disconnect())
+                log.info("LiveKit room disconnected.")
+            except Exception as lk_disc_err:
+                log.error("Error disconnecting LiveKit room.", error_str=str(lk_disc_err), exc_info=True)
+        if livekit_room_service_client and hasattr(livekit_room_service_client, 'close'):
+            log.info("Closing LiveKit service client...")
+            try:
+                asyncio.run(livekit_room_service_client.close())
+                log.info("LiveKit service client closed.")
+            except Exception as lk_close_err:
+                log.error("Error closing LiveKit service client.", error_str=str(lk_close_err), exc_info=True)
+
+        if _pygame_mixer_initialized:
+            pygame.mixer.quit()
+            log.info("Pygame mixer quit.")
+        pygame.quit()
+        log.info("Pygame quit. Application terminée.")
+        # User-facing print, keep:
+        print("Application terminée.")

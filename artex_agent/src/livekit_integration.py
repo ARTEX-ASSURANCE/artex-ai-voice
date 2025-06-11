@@ -7,6 +7,10 @@ from livekit import RoomServiceClient, Room, RoomOptions, LocalAudioTrack, Audio
 # from livekit.protocol import room_service as proto_room_service
 from dotenv import load_dotenv
 
+# Import logging configuration
+from .logging_config import get_logger
+log = get_logger(__name__)
+
 # For PoC, we'll simulate audio frames. In reality, this needs proper audio handling.
 SAMPLE_RATE = 48000
 NUM_CHANNELS = 1
@@ -22,10 +26,18 @@ def get_livekit_room_service():
     livekit_api_secret = os.getenv("LIVEKIT_API_SECRET")
 
     if not all([livekit_url, livekit_api_key, livekit_api_secret]):
+        # This error will be caught by the caller, no direct log here is strictly needed,
+        # but good for direct invocation.
+        log.error("LIVEKIT_URL, LIVEKIT_API_KEY, or LIVEKIT_API_SECRET missing in environment.")
         raise ValueError("LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET must be set in environment variables.")
 
-    room_service = RoomServiceClient(livekit_url, livekit_api_key, livekit_api_secret, keepalive_interval=60.0)
-    return room_service
+    try:
+        room_service = RoomServiceClient(livekit_url, livekit_api_key, livekit_api_secret, keepalive_interval=60.0)
+        log.info("RoomServiceClient initialized.", livekit_url=livekit_url)
+        return room_service
+    except Exception as e:
+        log.error("Failed to initialize RoomServiceClient.", error_str=str(e), exc_info=True)
+        raise # Re-raise to indicate failure
 
 def generate_livekit_access_token(
         room_name: str,
@@ -39,7 +51,7 @@ def generate_livekit_access_token(
     api_secret = os.getenv("LIVEKIT_API_SECRET")
 
     if not api_key or not api_secret:
-        print("Error: LIVEKIT_API_KEY or LIVEKIT_API_SECRET not found in environment.")
+        log.error("LIVEKIT_API_KEY or LIVEKIT_API_SECRET not found for token generation.")
         return None
 
     video_grant = VideoGrant(
@@ -62,9 +74,10 @@ def generate_livekit_access_token(
 
     try:
         token_jwt = access_token.to_jwt()
+        log.info("LiveKit access token generated.", identity=participant_identity, room_name=room_name)
         return token_jwt
     except Exception as e:
-        print(f"Error generating LiveKit token: {e}")
+        log.error("Error generating LiveKit token.", error_str=str(e), exc_info=True)
         return None
 
 async def join_room_with_token(livekit_url: str, token: str, participant_identity: str) -> Room | None:
@@ -76,19 +89,19 @@ async def join_room_with_token(livekit_url: str, token: str, participant_identit
 
     @room.on("participant_connected")
     async def on_participant_connected(participant: Participant):
-        print(f"Participant {participant.identity} (local: {participant.is_local}) connected to room {room.name}")
+        log.info("LiveKit: Participant connected.", room_name=room.name, participant_identity=participant.identity, is_local=participant.is_local)
 
     @room.on("disconnected")
     async def on_disconnected():
-        print(f"Participant {participant_identity} disconnected from room {room.name}")
+        log.info("LiveKit: Participant disconnected.", room_name=room.name, participant_identity=participant_identity) # This uses the outer scope identity
 
     try:
-        print(f"Participant {participant_identity} attempting to connect to room at {livekit_url}...")
+        log.info("LiveKit: Attempting to connect to room.", room_url_masked=livekit_url.split('?')[0], participant_identity=participant_identity)
         await room.connect(livekit_url, token, options=RoomOptions(auto_subscribe=True))
-        print(f"Participant {participant_identity} successfully connected to room: {room.name}")
+        log.info("LiveKit: Successfully connected to room.", room_name=room.name, participant_identity=participant_identity)
         return room
     except Exception as e:
-        print(f"Participant {participant_identity} error connecting to room: {e}")
+        log.error("LiveKit: Error connecting to room.", participant_identity=participant_identity, error_str=str(e), exc_info=True)
         return None
 
 
@@ -99,9 +112,9 @@ async def publish_tts_audio_to_room(room: Room, text_to_speak: str):
     Placeholder for publishing TTS audio to the LiveKit room.
     """
     if not room or not room.local_participant:
-        print("Cannot publish TTS: Not connected to a room or no local participant.")
+        log.warn("Cannot publish TTS: Not connected to a room or no local participant.")
         return
-    print(f"LiveKit (Simulated TTS Publish): Would publish audio for text: '{text_to_speak}' to room '{room.name}' by {room.local_participant.identity}")
+    log.info("LiveKit (Simulated TTS Publish): Publishing audio.", text_snippet=text_to_speak[:30], room_name=room.name, participant_identity=room.local_participant.identity)
     await asyncio.sleep(0.1) # Simulate async work
 
 async def handle_room_events(room: Room):
@@ -109,52 +122,56 @@ async def handle_room_events(room: Room):
     Placeholder for handling room events, especially incoming audio tracks.
     """
     if not room:
-        print("Room object not provided for event handling.")
+        log.warn("Room object not provided for event handling.")
         return
-    print(f"Setting up event handlers for room: {room.name} (Participant: {room.local_participant.identity})")
+    log.info("Setting up event handlers for room.", room_name=room.name, participant_identity=(room.local_participant.identity if room.local_participant else "N/A"))
 
     @room.on("track_subscribed")
     async def on_track_subscribed(track, publication, participant):
-        print(f"Track subscribed: {track.sid} from participant {participant.identity} (name: {participant.name})")
+        log.info("LiveKit: Track subscribed.", track_sid=track.sid, participant_identity=participant.identity, track_kind=track.kind)
         if track.kind == "audio":
-            print(f"Subscribed to AUDIO track from {participant.identity}. PoC: Will not process frames.")
+            log.info("Subscribed to AUDIO track. PoC: Will not process frames.", track_sid=track.sid, participant_identity=participant.identity)
         elif track.kind == "video":
-            print(f"Subscribed to VIDEO track from {participant.identity}. (Not handled by this agent)")
+            log.info("Subscribed to VIDEO track (Not handled by this agent).", track_sid=track.sid, participant_identity=participant.identity)
 
     @room.on("track_unsubscribed")
     async def on_track_unsubscribed(track, publication, participant):
-        print(f"Track unsubscribed: {track.sid} from participant {participant.identity}")
+        log.info("LiveKit: Track unsubscribed.", track_sid=track.sid, participant_identity=participant.identity)
 
     @room.on("participant_disconnected")
     async def on_participant_disconnected(remote_participant: Participant): # Corrected type hint
-        print(f"Remote participant {remote_participant.identity} disconnected from room {room.name}.")
+        log.info("LiveKit: Remote participant disconnected.", room_name=room.name, participant_identity=remote_participant.identity)
 
     try:
         while room.connection_state == "connected": # Check based on Room's actual state property if available
             await asyncio.sleep(1)
     except asyncio.CancelledError:
-        print(f"Event handler task for room {room.name} cancelled.")
+        log.info("Event handler task cancelled.", room_name=room.name)
     finally:
-        print(f"Event handler task for room {room.name} finished.")
+        log.info("Event handler task finished.", room_name=room.name)
 
 
 # ----- Server-side/Admin test function (can remain for testing RoomServiceClient) -----
 async def test_list_rooms_admin(room_service: RoomServiceClient):
     """ Tests listing rooms using RoomServiceClient (admin task). """
     if not room_service:
+        log.warn("RoomServiceClient not initialized for admin test.")
         return False, "RoomServiceClient not initialized."
     try:
-        print("Attempting to list LiveKit rooms (admin)...")
+        log.info("Attempting to list LiveKit rooms (admin)...")
         list_rooms_result = await room_service.list_rooms()
         rooms_info = []
         if list_rooms_result and list_rooms_result.rooms:
-            for r in list_rooms_result.rooms: # Changed 'room' to 'r' to avoid conflict
-                rooms_info.append(f"  Room SID: {r.sid}, Name: {r.name}, Num Participants: {r.num_participants}")
+            for r_obj in list_rooms_result.rooms: # Renamed loop variable
+                rooms_info.append(f"  Room SID: {r_obj.sid}, Name: {r_obj.name}, Num Participants: {r_obj.num_participants}")
             rooms_str = "\n".join(rooms_info)
+            log.info("LiveKit admin: Rooms found.", num_rooms=len(rooms_info))
             return True, f"LiveKit admin connection successful. Rooms found:\n{rooms_str}"
         else:
+            log.info("LiveKit admin: No active rooms found.")
             return True, "LiveKit admin connection successful. No active rooms found."
     except Exception as e:
+        log.error("LiveKit admin connection test (list_rooms) failed.", error_str=str(e), exc_info=True)
         return False, f"LiveKit admin connection test (list_rooms) failed: {e}"
 
 
@@ -163,7 +180,17 @@ if __name__ == "__main__":
     dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
     load_dotenv(dotenv_path=dotenv_path)
 
-    print("--- Testing LiveKit Token Generation ---")
+    # Minimal logging setup for standalone execution if logging_config.py wasn't imported by an entry point
+    # This needs to be done *before* any log calls are made by the module's functions if run directly.
+    if not logging.getLogger().handlers or not structlog.is_configured():
+        import logging # Re-import for basicConfig
+        import structlog # Re-import for structlog
+        import sys # For sys.stdout
+        structlog.configure(processors=[structlog.dev.ConsoleRenderer()])
+        logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), stream=sys.stdout)
+        log.info("Minimal logging re-configured for livekit_integration.py standalone test.")
+
+    log.info("--- Testing LiveKit Token Generation ---")
     test_room_name = "my-test-room-for-token"
     test_participant_identity = "artex-agent-token-tester"
 
@@ -176,36 +203,34 @@ if __name__ == "__main__":
     )
 
     if token:
-        print(f"Generated Token for {test_participant_identity} in room {test_room_name}:")
-        print(token[:30] + "..." + token[-30:]) # Print snippet
+        log.info(f"Generated Token for {test_participant_identity} in room {test_room_name}: {token[:30]}...{token[-30:]}")
     else:
-        print("Failed to generate token.")
+        log.error("Failed to generate token in standalone test.")
 
-    print("\n--- Testing LiveKit RoomServiceClient (Admin Task - List Rooms) ---")
+    log.info("\n--- Testing LiveKit RoomServiceClient (Admin Task - List Rooms) ---")
     # This part tests the RoomServiceClient for admin tasks like listing rooms.
     # It's separate from participant connection logic.
     async def run_admin_tests():
         lk_service_client = None
         try:
-            lk_service_client = get_livekit_room_service()
+            lk_service_client = get_livekit_room_service() # This will log its own success/failure
             if lk_service_client:
-                print(f"LiveKit RoomServiceClient initialized for URL: {os.getenv('LIVEKIT_URL')}")
                 success, message = await test_list_rooms_admin(lk_service_client)
                 if success:
-                    print(f"Admin Test Result: SUCCESS - {message}")
+                    log.info(f"Admin Test Result: SUCCESS - {message}")
                 else:
-                    print(f"Admin Test Result: FAILED - {message}")
+                    log.warn(f"Admin Test Result: FAILED - {message}") # Changed to warn as error is logged in func
             else:
-                print("Skipping admin tests as RoomServiceClient could not be initialized.")
-        except ValueError as ve:
-            print(f"Admin Test Configuration Error: {ve}")
+                log.warn("Skipping admin tests as RoomServiceClient could not be initialized.")
+        except ValueError as ve: # Raised by get_livekit_room_service if config is missing
+            log.error(f"Admin Test Configuration Error: {ve}") # Already logged by get_livekit_room_service
         except Exception as e:
-            print(f"An unexpected error occurred during LiveKit admin tests: {e}")
+            log.critical(f"An unexpected error occurred during LiveKit admin tests.", error_str=str(e), exc_info=True)
         finally:
             if lk_service_client:
-                print("Closing LiveKit RoomServiceClient (admin test)...")
+                log.info("Closing LiveKit RoomServiceClient (admin test)...")
                 await lk_service_client.close()
-                print("LiveKit RoomServiceClient (admin test) closed.")
+                log.info("LiveKit RoomServiceClient (admin test) closed.")
 
     asyncio.run(run_admin_tests())
 

@@ -6,7 +6,7 @@ import datetime
 
 # Assuming models are in this path, adjust if your structure is different
 # e.g., from artex_agent.src.database_models import ...
-from .database_models import Adherent, Contrat, Formule, Garantie, SinistreArthex, formules_garanties_association
+from .database_models import Adherent, Contrat, Formule, Garantie, SinistreArtex, formules_garanties_association
 
 class BaseRepository:
     def __init__(self, session: AsyncSession):
@@ -189,29 +189,29 @@ class GarantieRepository(BaseRepository):
         result = await self.session.execute(stmt)
         return result.scalars().all()
 
-class SinistreArthexRepository(BaseRepository):
-    async def create_sinistre_arthex(self, sinistre_data: Dict[str, Any]) -> SinistreArthex:
+class SinistreArtexRepository(BaseRepository): # Renamed class
+    async def create_sinistre_artex(self, sinistre_data: Dict[str, Any]) -> SinistreArtex: # Renamed method and return type
         if 'date_declaration_agent' in sinistre_data and isinstance(sinistre_data['date_declaration_agent'], str):
             sinistre_data['date_declaration_agent'] = datetime.date.fromisoformat(sinistre_data['date_declaration_agent'])
         if 'date_survenance' in sinistre_data and isinstance(sinistre_data['date_survenance'], str):
             sinistre_data['date_survenance'] = datetime.date.fromisoformat(sinistre_data['date_survenance'])
 
-        sinistre = SinistreArthex(**sinistre_data)
+        sinistre = SinistreArtex(**sinistre_data) # Updated model instantiation
         self.session.add(sinistre)
         await self.session.flush()
         await self.session.refresh(sinistre)
         return sinistre
 
-    async def get_sinistre_arthex_by_id(self, id_sinistre_arthex: int) -> Optional[SinistreArthex]:
-        stmt = select(SinistreArthex).where(SinistreArthex.id_sinistre_arthex == id_sinistre_arthex).options(
-            selectinload(SinistreArthex.contrat),
-            selectinload(SinistreArthex.adherent)
+    async def get_sinistre_artex_by_id(self, id_sinistre_artex: int) -> Optional[SinistreArtex]: # Renamed method, param, and return type
+        stmt = select(SinistreArtex).where(SinistreArtex.id_sinistre_artex == id_sinistre_artex).options( # Updated model and field
+            selectinload(SinistreArtex.contrat), # Updated model
+            selectinload(SinistreArtex.adherent) # Updated model
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def list_sinistres_by_adherent_id(self, id_adherent: int, skip: int = 0, limit: int = 100) -> Sequence[SinistreArthex]:
-        stmt = select(SinistreArthex).where(SinistreArthex.id_adherent == id_adherent).offset(skip).limit(limit).order_by(SinistreArthex.date_declaration_agent.desc())
+    async def list_sinistres_by_adherent_id(self, id_adherent: int, skip: int = 0, limit: int = 100) -> Sequence[SinistreArtex]: # Updated return type
+        stmt = select(SinistreArtex).where(SinistreArtex.id_adherent == id_adherent).offset(skip).limit(limit).order_by(SinistreArtex.date_declaration_agent.desc()) # Updated model
         result = await self.session.execute(stmt)
         return result.scalars().all()
 

@@ -1,213 +1,169 @@
-# Manual Testing Guide for ARTEX ASSURANCES AI Agent
-
-This guide provides steps for manually testing the ARTEX ASSURANCES AI Agent, covering its various functionalities including voice interaction, database operations, and LiveKit integration (Proof of Concept).
+# ARTEX ASSURANCES AI Agent - Manual Testing Guide
 
 ## 1. Setup and Configuration
 
-### 1.1. Install Dependencies
-*   Ensure you have Python 3.10+ installed.
-*   Open a terminal in the `artex_agent` root directory.
-*   Install required Python packages:
-    ```bash
-    pip install -r requirements.txt
-    ```
-*   **System Dependencies**: The agent uses PyAudio and Pygame for local voice I/O, which might require system-level libraries.
-    *   For Debian/Ubuntu:
+Before running any tests, ensure your environment is correctly set up:
+
+1.  **Prerequisites Met**:
+    *   Python 3.9+ installed.
+    *   `pip` and `venv` available.
+    *   MySQL 8 server accessible.
+    *   LiveKit server accessible (for LiveKit PoC tests).
+    *   Google Cloud account with Gemini API and (optionally for better TTS) Google Cloud Text-to-Speech API enabled.
+    *   System dependencies for PyAudio (e.g., `portaudio19-dev`) and pydub (`ffmpeg`) installed.
+
+2.  **Project Setup**:
+    *   Clone the repository (if applicable).
+    *   Navigate to the `artex_agent` project root.
+    *   Create and activate a Python virtual environment (e.g., `python -m venv venv && source venv/bin/activate`).
+    *   Install dependencies: `pip install -r requirements.txt`.
+
+3.  **Environment Variables (`.env` file)**:
+    *   Copy `.env.template` to `.env`: `cp .env.template .env`.
+    *   Edit `.env` and fill in all required credentials and configurations as described in the comments within `.env.template`. This includes:
+        *   `GEMINI_API_KEY` (Required)
+        *   `DATABASE_URL` (Required for DB features)
+        *   `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` (Required for LiveKit PoC features)
+        *   `GOOGLE_APPLICATION_CREDENTIALS` (Required if `TTS_USE_GOOGLE_CLOUD=true`)
+        *   Other TTS settings, `LOG_LEVEL`, etc., as needed.
+
+4.  **Database Initialization**:
+    *   Ensure your MySQL server is running and the database specified in `DATABASE_URL` exists.
+    *   Initialize the schema:
+        *   **Option A (Recommended for schema management): Alembic Migrations**
+            ```bash
+            alembic upgrade head
+            ```
+        *   **Option B (Quick Dev Setup): `init_db.py`**
+            ```bash
+            python init_db.py
+            ```
+            (Set `DROP_TABLES_FIRST=true` in `.env` to clear existing tables first).
+    *   **Sample Data**: For some database tests (e.g., retrieving existing contracts), you may need to manually insert sample data into the `adherents`, `formules`, `garanties`, `formules_garanties`, and `contrats` tables according to the schema in `database_models.py`.
+
+5.  **Microphone & Speakers**: Ensure a working microphone and speakers are configured on your system for Voice I/O tests with the CLI agent.
+
+## 2. Running the Agent / API
+
+*   **CLI Agent**: `python src/agent.py [options]`
+    *   Options: `--mic-index <index>`, `--livekit-room <name> --livekit-identity <id>`
+*   **FastAPI Server**: `uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload` (from `artex_agent` root)
+
+## 3. Test Case Series
+
+### TC-GEN: General CLI Agent Interaction
+(Run `python src/agent.py` for these tests)
+
+*   **TC-GEN-1: Basic French Conversation & Persona**:
+    *   Steps: Start agent. Greet it ("Bonjour Jules"). Ask a simple question ("Comment ça va?"). Ask about Artex ("Que fait ARTEX ASSURANCES?").
+    *   Expected: Agent responds in French, maintains a professional and friendly persona (Jules from Artex).
+*   **TC-GEN-2: Voice Input Mode**:
+    *   Steps: Start agent (default voice mode). Speak a query when prompted.
+    *   Expected: Agent transcribes speech, processes query, responds with voice and text.
+*   **TC-GEN-3: Switch to Text Mode**:
+    *   Steps: In voice mode, type `texte` when prompted for voice or after an ASR timeout/error.
+    *   Expected: Agent switches to text input (`Vous (texte):`). Interactions continue via typed text.
+*   **TC-GEN-4: Switch back to Voice Mode**:
+    *   Steps: In text mode, type `voix`.
+    *   Expected: Agent switches to voice input mode (`Parlez maintenant...`).
+*   **TC-GEN-5: Handling Unclear Audio / ASR Timeout**:
+    *   Steps: In voice mode, stay silent or mumble when prompted.
+    *   Expected: Agent indicates it didn't understand or timed out (e.g., "Je n'ai rien entendu...", `[ASR_SILENCE_TIMEOUT]`, `[ASR_UNKNOWN_VALUE]`) and offers to retry or switch mode.
+*   **TC-GEN-6: Clean Exit**:
+    *   Steps: Press `Ctrl+C` or type `quitter` (if implemented as an exit command).
+    *   Expected: Agent exits cleanly (e.g., "Au revoir!").
+
+### TC-ENV: Environment & Configuration
+*   **TC-ENV-1: Missing Critical Keys in `.env`**:
+    *   Steps: Temporarily remove or corrupt `GEMINI_API_KEY` in `.env`. Start `agent.py` or `main.py`.
+    *   Expected: Agent/API fails to start or initialize services, logging clear errors about the missing key. `GeminiClient` should raise `ValueError`. Health check should show Gemini error.
+*   **TC-ENV-2: Missing Service-Specific Key (e.g., `DATABASE_URL`)**:
+    *   Steps: Remove `DATABASE_URL` from `.env`. Start agent/API. Attempt an action requiring DB access (e.g., get contract details).
+    *   Expected: The specific action fails gracefully, logging errors. Health check shows DB error. Agent might respond with a technical issue message.
+
+### TC-FS: Fail-Safe Mechanisms (Clarification & Handoff)
+(Run `python src/agent.py`)
+*   **TC-FS-1: Trigger Clarification**:
+    *   Steps: Ask an ambiguous question (e.g., "Je veux des infos sur l'assurance.").
+    *   Expected: Agent responds starting with `[CLARIFY]` and asks a clarifying question (e.g., "Quel type d'assurance vous intéresse?"). Provide clarification. Agent uses it for the next response.
+*   **TC-FS-2: Trigger Handoff (After Clarification Fails)**:
+    *   Steps: To a clarification question, give another vague or unhelpful answer.
+    *   Expected: Agent eventually responds starting with `[HANDOFF]` and suggests contacting a human advisor.
+*   **TC-FS-3: Trigger Handoff (User Request / Complex Query)**:
+    *   Steps: Ask "Je veux parler à un conseiller." or a very complex, out-of-scope question.
+    *   Expected: Agent responds with `[HANDOFF]`.
+
+### TC-DB: Database Interactions (via Gemini Function Calling)
+(Run `python src/agent.py`. Requires database schema initialized and potentially sample data.)
+*   **TC-DB-1: Get Contract Details (Exists)**:
+    *   Steps: "Donne-moi les détails de mon contrat numéro XYZ." (Use an existing `numero_contrat` from your sample data).
+    *   Expected: Agent uses `get_contrat_details` function. Gemini formulates a response summarizing the contract type, status, adherent, formula, and key guarantees with their terms.
+*   **TC-DB-2: Get Contract Details (Does Not Exist)**:
+    *   Steps: "Je voudrais les infos pour la police ABC999." (Use a non-existent `numero_contrat`).
+    *   Expected: Agent uses `get_contrat_details`. Gemini responds that the contract was not found or asks to verify the number.
+*   **TC-DB-3: Open Claim (Success)**:
+    *   Steps: "Je veux déclarer un sinistre pour mon contrat XYZ. C'est un dégât des eaux dans ma cuisine. C'est arrivé hier." (Provide `numero_contrat`, `type_sinistre`, `description_sinistre`, optional `date_survenance`).
+    *   Expected: Agent uses `open_claim` function. A new record is created in `sinistres_artex`. Gemini confirms the claim declaration has been recorded by Artex and provides the internal reference ID (`id_sinistre_artex`).
+*   **TC-DB-4: Open Claim (Contract Not Found)**:
+    *   Steps: Attempt to open a claim for a non-existent `numero_contrat`.
+    *   Expected: Agent uses `open_claim`. Gemini responds that the contract number is invalid or not found.
+
+### TC-TTS: Text-to-Speech Service
+(Primarily observed via `agent.py` voice output and logs from `tts.py` if run standalone)
+*   **TC-TTS-1: Google Cloud TTS (if configured)**:
+    *   Steps: Ensure `GOOGLE_APPLICATION_CREDENTIALS` and `TTS_USE_GOOGLE_CLOUD=true` are correctly set in `.env`. Interact with `agent.py`.
+    *   Expected: Voice output should be of higher quality (Google Cloud). Logs in `tts.py` (if testing standalone) should indicate Google Cloud TTS usage. Check `TTS_CACHE_DIR` for MP3s.
+*   **TC-TTS-2: gTTS Fallback**:
+    *   Steps: Unset `GOOGLE_APPLICATION_CREDENTIALS` or set `TTS_USE_GOOGLE_CLOUD=false`. Interact with `agent.py`.
+    *   Expected: Voice output uses gTTS. Logs indicate fallback. Check `TTS_CACHE_DIR`.
+*   **TC-TTS-3: Caching**:
+    *   Steps: Ask the agent to say the same phrase multiple times.
+    *   Expected: First time, TTS is generated. Subsequent times, logs should indicate a cache hit, and response should be faster. Verify MP3 file in `TTS_CACHE_DIR`.
+
+### TC-LK: LiveKit PoC Mode
+(Run `python src/agent.py --livekit-room testroom --livekit-identity artexbot` for these tests. Requires LiveKit server.)
+*   **TC-LK-1: Connect to LiveKit Room**:
+    *   Steps: Run agent in LiveKit mode.
+    *   Expected: Logs indicate `LiveKitParticipantHandler` attempting to connect, (simulated) join success, and (simulated) welcome message played via TTS publishing path.
+*   **TC-LK-2: Simulated TTS in LiveKit Mode**:
+    *   Steps: Agent needs to generate a response (e.g., after a simulated user query via CLI text).
+    *   Expected: Logs from `LiveKitParticipantHandler` show "Would publish TTS audio..." or similar, indicating TTS output is routed to the LiveKit publishing logic (which is currently simulated). No local audio playback via Pygame.
+*   **TC-LK-3: Simulated ASR & Full Interaction in LiveKit Mode**:
+    *   Steps: When agent is "listening" in LiveKit mode, it will prompt for text input ("Simulated LiveKit STT Input:"). Type a query.
+    *   Expected: Logs from `LiveKitParticipantHandler` show (simulated) `TrackPublished` event for a remote user, then (simulated) ASR processing of dummy audio, then ideally the typed text being used as the "transcribed" input for Gemini. Agent responds using simulated TTS publishing.
+*   **TC-LK-4: Silence Hangup in LiveKit Mode**:
+    *   Steps: Connect to LiveKit. Play welcome message. Wait for `USER_SILENCE_HANGUP_SECONDS` (e.g., 30s) without providing any (simulated text) input.
+    *   Expected: `LiveKitParticipantHandler` logs user silence timeout and initiates disconnect. Agent exits or signals disconnection.
+*   **TC-LK-5: Clean Exit from LiveKit Mode**:
+    *   Steps: Press `Ctrl+C` while agent is in LiveKit mode.
+    *   Expected: Agent logs disconnection from LiveKit and exits cleanly.
+
+### TC-API: FastAPI Application
+(Run `uvicorn src.main:app --host 0.0.0.0 --port 8000`. Requires services like DB, Gemini to be configured in `.env`.)
+*   **TC-API-1: Root Endpoint**:
+    *   Steps: Open `http://localhost:8000/` in a browser or use `curl`.
+    *   Expected: JSON response `{"message": "Welcome to the ARTEX Assurances AI Agent API"}`.
+*   **TC-API-2: Health Check (All OK)**:
+    *   Steps: Ensure DB and Gemini (`GEMINI_API_KEY`) are correctly configured. Access `http://localhost:8000/healthz`.
+    *   Expected: JSON response with `overall_status: "ok"`, and `database_status: "ok"`, `gemini_status: "ok"`.
+*   **TC-API-3: Health Check (DB Error)**:
+    *   Steps: Stop MySQL server or corrupt `DATABASE_URL`. Access `http://localhost:8000/healthz`.
+    *   Expected: JSON response with `overall_status: "error"`, `database_status: "error"` (or "not_configured"), `gemini_status: "ok"`.
+*   **TC-API-4: Health Check (Gemini Error)**:
+    *   Steps: Remove/corrupt `GEMINI_API_KEY`. Restart API. Access `http://localhost:8000/healthz`.
+    *   Expected: JSON response with `overall_status: "error"`, `gemini_status: "error_api_key_missing"` (or similar).
+*   **TC-API-5: LiveKit Webhook Placeholder**:
+    *   Steps: Send a POST request with any JSON payload to `http://localhost:8000/webhook/livekit` (e.g., using `curl` or Postman).
         ```bash
-        sudo apt-get update
-        sudo apt-get install -y portaudio19-dev python3-pyaudio libsdl2-mixer-2.0-0
+        # curl -X POST -H "Content-Type: application/json" -d '{"event":"test_event", "data":"some_data"}' http://localhost:8000/webhook/livekit
         ```
-    *   For other OS, please refer to PyAudio and Pygame installation guides if you encounter issues.
+    *   Expected: JSON response `{"status": "webhook_received_successfully"}`. Check API logs for the printed payload.
+*   **TC-API-6: CORS Headers**:
+    *   Steps: From a different origin (e.g., a simple HTML page served on a different port, or using Postman/curl with an `Origin` header like `http://localhost:3001`), make a GET request to `/`.
+    *   Expected: Response includes CORS headers like `access-control-allow-origin`. (Exact check depends on client, but presence of header is key).
 
-### 1.2. Environment Variables (`.env` file)
-*   The agent relies on an `.env` file in the `artex_agent` root directory to manage API keys and service URLs.
-*   Create a file named `.env` by copying from `.env.template` (`cp .env.template .env`) and populate it with the following keys:
-    ```env
-    GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
-    DATABASE_URL="mysql+aiomysql://YOUR_DB_USER:YOUR_DB_PASSWORD@YOUR_DB_HOST:YOUR_DB_PORT/YOUR_DB_NAME"
-    LIVEKIT_URL="wss://YOUR_LIVEKIT_SERVER_URL"
-    LIVEKIT_API_KEY="YOUR_LIVEKIT_API_KEY"
-    LIVEKIT_API_SECRET="YOUR_LIVEKIT_API_SECRET"
-    ```
-    *   Replace placeholder values (e.g., `YOUR_GEMINI_API_KEY`) with your actual credentials and service details.
-    *   The `.gitignore` file is configured to prevent committing the `.env` file.
-
-### 1.3. Database Setup (for Database Interaction Tests)
-*   For test cases involving database interactions (TC-DB series), ensure you have a MySQL database server running and accessible.
-*   The database schema should align with the models defined in `src/database_models.py` (tables: `clients`, `contrats`, `remboursements`, `sinistres`, `user_preferences`).
-*   You can initialize the schema using the `init_db.py` script:
-    ```bash
-    python artex_agent/init_db.py
-    ```
-    Set `DROP_TABLES_FIRST=true` as an environment variable if you want to drop existing tables before creation.
-*   Populate tables with sample data (e.g., policy `POL123`, user `USER001` in `user_preferences`, a client `USER001` in `clients`) for the tests to pass as described.
-
-### 1.4. LiveKit Server Setup (for LiveKit PoC Tests)
-*   For LiveKit integration tests (TC-LK series), ensure you have a LiveKit server instance running and accessible.
-*   The `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` in your `.env` file must point to this server.
-
-## 2. Running the Agent
-
-*   Navigate to the `artex_agent` root directory in your terminal.
-*   **Standard Mode (CLI Voice/Text)**:
-    ```bash
-    python src/agent.py
-    ```
-*   **LiveKit Mode (PoC)**:
-    ```bash
-    python src/agent.py --livekit-room YOUR_ROOM_NAME --livekit-identity YOUR_AGENT_IDENTITY
-    ```
-    *   Replace `YOUR_ROOM_NAME` with a desired room name (e.g., `artex_test_room`).
-    *   Replace `YOUR_AGENT_IDENTITY` with a unique identity for the agent in the room (e.g., `artex_voice_agent`). The default is `artex_agent_poc`.
-
-## 3. General Interaction Test Cases
-
-### TC-GEN-1: Basic French Voice Interaction (Standard Mode)
-*   **Mode**: Standard
-*   **Steps**:
-    1.  Start the agent: `python src/agent.py`.
-    2.  When prompted "Parlez maintenant...", say a simple French phrase (e.g., "Bonjour, comment ça va?").
-*   **Expected**:
-    1.  Agent transcribes speech ("Vous (voix): ...").
-    2.  Agent indicates it's thinking ("Agent (ARTEX): ...pense...").
-    3.  Agent prints its textual response ("Agent (ARTEX) (texte): ...").
-    4.  Agent speaks the response in French using local TTS (pygame).
-
-### TC-GEN-2: ARTEX Persona and Contextual Response
-*   **Mode**: Standard or LiveKit
-*   **Steps**: Ask an insurance-related question (e.g., "Qu'est-ce qu'une assurance habitation?" or "Parle-moi de l'assurance auto.").
-*   **Expected**: Agent responds in French, professionally, consistent with ARTEX persona, and provides relevant information.
-
-### TC-GEN-3: Input Mode Switching (Voice to Text - Standard Mode)
-*   **Mode**: Standard
-*   **Steps**:
-    1.  Start agent. At "Parlez maintenant...", wait or mumble.
-    2.  Agent prompts to switch: "...Taper 'texte' pour saisie manuelle...". Type `texte`.
-*   **Expected**: Agent switches to text input ("Agent (ARTEX): Mode de saisie par texte activé."). Prompt changes to "Vous (texte):".
-
-### TC-GEN-4: Input Mode Switching (Text to Voice - Standard Mode)
-*   **Mode**: Standard
-*   **Steps**: In text mode, type `voix`.
-*   **Expected**: Agent switches to voice input ("Agent (ARTEX): Mode de saisie vocale activé."). Prompt changes to "Parlez maintenant...".
-
-### TC-GEN-5: Handling Unclear Audio (Standard Mode)
-*   **Mode**: Standard
-*   **Steps**: Mumble or stay silent at "Parlez maintenant...".
-*   **Expected**: Agent indicates non-comprehension ("Agent (ARTEX): Désolé, je n'ai pas compris...") and prompts to retry/switch.
-
-### TC-GEN-6: Clean Exit
-*   **Mode**: Standard or LiveKit
-*   **Steps**: Press `Ctrl+C` in the terminal where the agent is running.
-*   **Expected**: Agent prints "Au revoir!", "Application terminée.", and exits cleanly. If in LiveKit mode, LiveKit cleanup messages should also appear.
-
-## 4. Environment Variable and Configuration Tests
-
-### TC-ENV-1: Missing Critical Keys in `.env`
-*   **Steps**:
-    1.  Temporarily rename or remove the `.env` file, OR remove/comment out `GEMINI_API_KEY`.
-    2.  Try to start the agent: `python src/agent.py`.
-*   **Expected**: Agent fails to start or initialize critical services (Gemini), printing an error message (e.g., "ValueError: GEMINI_API_KEY environment variable not set..."). The application might exit or critical functionalities will be impaired.
-
-### TC-ENV-2: Missing Service-Specific Key (e.g., `DATABASE_URL`)
-*   **Steps**:
-    1.  Ensure `.env` exists with `GEMINI_API_KEY`.
-    2.  Remove or comment out `DATABASE_URL` from `.env`.
-    3.  Start the agent.
-    4.  Ask a question that would trigger a database operation (e.g., "Donne-moi les détails de la police POL123").
-*   **Expected**:
-    1.  Agent starts, Gemini initializes.
-    2.  Database engine initialization fails (logged to console: "CRITICAL: DATABASE_URL environment variable not set..." or similar from `src/database.py`).
-    3.  When a DB operation is attempted, Gemini should be prompted to inform the user of a configuration problem (e.g., "Désolé, je ne peux pas accéder à la base de données pour le moment en raison d'un problème de configuration.").
-
-## 5. Database Interaction Test Cases (Requires DB Setup as per 1.3)
-
-### TC-DB-1: Read Policy Details (Policy Exists)
-*   **Mode**: Standard or LiveKit
-*   **Prerequisites**: Database contains a policy, e.g., `policy_id="POL123"`, `user_id="USER001"`, `policy_type="Auto"`, `start_date="2023-01-01"`, `end_date="2024-01-01"`, `premium_amount=500.00`, `status="Actif"`.
-*   **Steps**: Ask "Quels sont les détails de ma police POL123?".
-*   **Expected**: Agent responds with the details of policy POL123, formulated in natural language by Gemini (e.g., "Votre police auto POL123 est active du 2023-01-01 au 2024-01-01 avec une prime de 500.00.").
-
-### TC-DB-2: Read Policy Details (Policy Does Not Exist)
-*   **Mode**: Standard or LiveKit
-*   **Steps**: Ask "Quels sont les détails de ma police POLXYZ?".
-*   **Expected**: Agent states that policy POLXYZ was not found and may ask if you want to try another ID (e.g., "Je n'ai pas trouvé de police avec le numéro POLXYZ. Souhaitez-vous vérifier le numéro ou essayer autre chose?").
-
-### TC-DB-3: Update User Preference (Success - Set to True)
-*   **Mode**: Standard or LiveKit
-*   **Prerequisites**: A user preference record for `user_id="USER001"` can be created/updated.
-*   **Steps**: Ask "Je voudrais recevoir les mises à jour par e-mail pour l'utilisateur USER001." (Gemini should request JSON with `receive_updates: true`).
-*   **Expected**: Agent confirms the preference has been updated to true (e.g., "Parfait, l'utilisateur USER001 recevra désormais les mises à jour par e-mail.").
-
-### TC-DB-4: Update User Preference (Success - Set to False)
-*   **Mode**: Standard or LiveKit
-*   **Prerequisites**: A user preference record for `user_id="USER001"`.
-*   **Steps**: Ask "Je ne veux plus recevoir les mises à jour par e-mail pour USER001." (Gemini should request JSON with `receive_updates: false`).
-*   **Expected**: Agent confirms the preference has been updated to false (e.g., "Compris, l'utilisateur USER001 ne recevra plus les mises à jour par e-mail.").
-
-### TC-DB-5: Database Operation Error (Conceptual)
-*   **Steps**: If the database becomes unavailable (e.g., MySQL server is stopped) while the agent is running, and a query requiring DB access is made.
-*   **Expected**: Agent informs the user of a technical problem trying to access the database and suggests trying later (e.g., "Je rencontre un problème technique pour accéder aux informations. Veuillez réessayer plus tard.").
-
-## 6. Fail-Safe Mechanism Tests (Clarification & Handoff)
-
-### TC-FS-1: Trigger Clarification
-*   **Mode**: Standard or LiveKit
-*   **Steps**: Ask an ambiguous question like "Parle-moi de l'assurance."
-*   **Expected**: Agent's response starts with `[CLARIFY]` and asks for more specific details (e.g., "Agent (ARTEX) a besoin de précisions: Pourriez-vous préciser quel type d'assurance vous intéresse?"). Provide a clarification. Agent uses it for the next response.
-
-### TC-FS-2: Trigger Handoff (After Clarification Fails)
-*   **Mode**: Standard or LiveKit
-*   **Steps**:
-    1.  Trigger a clarification (TC-FS-1).
-    2.  When asked for clarification, give another vague or unhelpful response that leads Gemini to still be unable to answer.
-*   **Expected**: Agent recognizes it still cannot help and initiates a handoff (e.g., "Même avec ces précisions, il serait préférable de parler à un conseiller pour cette situation. Je vous mets en relation." or similar, possibly after a second `[CLARIFY]` leading to handoff logic).
-
-### TC-FS-3: Trigger Handoff (Directly by Gemini or Explicit User Request)
-*   **Mode**: Standard or LiveKit
-*   **Steps**: Ask a question that is explicitly outside the agent's scope as defined in `ARTEX_CONTEXT_PROMPT` (e.g., "Je veux acheter des actions ARTEX") or directly say "Je veux parler à un conseiller."
-*   **Expected**: Agent responds with a handoff message (e.g., "Je comprends. Pour vous aider au mieux, je vais vous mettre en relation avec un conseiller humain."). The conversation might end or prompt for further, unrelated queries.
-
-## 7. LiveKit PoC Test Cases (Requires LiveKit Setup as per 1.4)
-
-### TC-LK-1: Connect to LiveKit Room
-*   **Mode**: LiveKit
-*   **Steps**: Run agent with `--livekit-room my_test_room --livekit-identity agent_artie_01`.
-*   **Expected**:
-    1.  Console logs indicate: "LiveKit RoomServiceClient initialized...", "Token generated...", "Connecting to room my_test_room...", "Successfully joined LiveKit room: my_test_room as agent_artie_01".
-    2.  Agent prints: "Agent en mode LiveKit. Saisie vocale simulée par entrée texte."
-    3.  Input prompt changes to "Agent (LiveKit - Simulant STT): Entrez le texte de l'utilisateur:".
-    4.  `handle_room_events` task starts (indicated by "Setting up event handlers...").
-
-### TC-LK-2: Simulated TTS in LiveKit Mode
-*   **Mode**: LiveKit
-*   **Steps**: After connecting (TC-LK-1), type a query like "Bonjour".
-*   **Expected**:
-    1.  Agent processes query with Gemini.
-    2.  Console logs: "Agent (LiveKit TTS - Sim): [Response Text from Gemini]".
-    3.  Textual response also printed: "Agent (ARTEX) (texte): [Response Text from Gemini]".
-    4.  No local audio playback via pygame.
-
-### TC-LK-3: Simulated STT & Full Interaction in LiveKit Mode
-*   **Mode**: LiveKit
-*   **Steps**: Continue interaction by typing various queries. Test a database query (e.g., "détails police POL123") and a clarification scenario.
-*   **Expected**:
-    1.  Agent uses text input as simulated STT.
-    2.  All interaction flows (DB queries, clarification, handoff) work as in standard mode, but with TTS simulated via console logs.
-    3.  Agent remains connected to LiveKit. (External verification: check LiveKit server dashboard or another client to see the agent participant).
-
-### TC-LK-4: Exit from LiveKit Mode
-*   **Mode**: LiveKit
-*   **Steps**: Type `exit` or press `Ctrl+C`.
-*   **Expected**: Agent logs "Au revoir!", LiveKit cleanup messages ("Closing LiveKit service client...", "LiveKit room disconnected...", "LiveKit event handler task cancelled."), "Application terminée.", and exits cleanly.
-
-## 8. Notes and Known Limitations
-
-*   **Hardware (Standard Mode)**: A working microphone and speakers are needed for voice I/O in standard mode.
-*   **Gemini Variability**: LLM responses can vary. Focus on relevance, tone, and adherence to instructions (like JSON format, `[CLARIFY]`/`[HANDOFF]` tags) rather than exact phrasing.
-*   **Network**: Active internet is required for Google services (Gemini, Speech Recognition) and LiveKit.
-*   **LiveKit PoC**:
-    *   Audio streaming (both publishing agent's TTS and receiving participant's STT) is **simulated**.
-    *   TTS is logged to the console; it's not actually sent as audio frames to the LiveKit room.
-    *   STT uses text input from the console, not actual audio from other LiveKit participants.
-*   **Database**: Assumes schema in `src/database_models.py` exists and is populated for tests requiring data. The `init_db.py` script can create the schema.
-*   **Error Handling**: While error handling for common issues (API keys, DB connection) is present, it may not cover all edge cases.
+## 4. Notes and Known Limitations
+*   **LiveKit gRPC Client**: The current LiveKit participant logic in `livekit_participant_handler.py` uses placeholder gRPC stubs. Actual audio streaming to/from LiveKit requires generating these stubs from LiveKit's `.proto` files and fully implementing the RTC client logic. The current tests simulate these interactions.
+*   **FFmpeg/LibAV**: `pydub` requires FFmpeg or LibAV for MP3 processing. Ensure it's installed on the system where the agent runs.
+*   **Google Cloud Credentials**: For Google Cloud TTS, `GOOGLE_APPLICATION_CREDENTIALS` must point to a valid service account key JSON file with the Text-to-Speech API enabled.
+*   **Sample Data**: Some database tests require pre-existing sample data that aligns with the schema.
