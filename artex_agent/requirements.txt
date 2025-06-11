@@ -1,0 +1,7 @@
+# Dependencies will be added here as the project evolves.
+google-generativeai
+SpeechRecognition
+PyAudio
+gTTS
+pygame
+pytest
