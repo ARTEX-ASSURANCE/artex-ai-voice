@@ -1,159 +1,224 @@
 import asyncio
 import speech_recognition as sr
 from typing import AsyncGenerator, Optional
+import os # For dotenv in main_test_asr
+
+# Import logging configuration
+from .logging_config import get_logger # Assuming it's in the same directory (src)
+log = get_logger(__name__)
 
 DEFAULT_LANGUAGE = "fr-FR"
-DEFAULT_SILENCE_TIMEOUT = 4  # seconds for recognizer.listen timeout
-DEFAULT_PHRASE_TIME_LIMIT = 15 # seconds for recognizer.listen phrase_time_limit
-DEFAULT_ADJUST_DURATION = 0.5 # seconds for ambient noise adjustment
+DEFAULT_SILENCE_TIMEOUT = 4
+DEFAULT_PHRASE_TIME_LIMIT = 15
+DEFAULT_ADJUST_DURATION = 0.5
 
 class ASRService:
     def __init__(self, device_index: Optional[int] = None):
         self.recognizer = sr.Recognizer()
-        # Consider dynamic energy adjustment based on initial tests.
-        # If background noise is relatively constant, one-time adjustment might be better.
-        # If it's highly variable, dynamic might be preferred but can sometimes be too sensitive.
-        self.recognizer.dynamic_energy_threshold = True # Defaulting to True
-        self.recognizer.pause_threshold = 0.8 # Default is 0.8, can be tuned
+        self.recognizer.dynamic_energy_threshold = True
+        self.recognizer.pause_threshold = 0.8
         self.device_index = device_index
-        # print(f"ASRService initialized. Mic index: {self.device_index if self.device_index is not None else 'Default'}. Dynamic energy: {self.recognizer.dynamic_energy_threshold}")
+        log.info("ASRService initialized.", mic_index=(self.device_index if self.device_index is not None else 'Default'),
+                 dynamic_energy=self.recognizer.dynamic_energy_threshold,
+                 pause_threshold=self.recognizer.pause_threshold)
 
     async def adjust_for_ambient_noise(self, duration: float = DEFAULT_ADJUST_DURATION):
-        """Adjusts for ambient noise using the configured microphone."""
-        # This should be called when the microphone is known and ideally once at startup
-        # if dynamic_energy_threshold is False or needs a baseline.
-        # If dynamic_energy_threshold = True, this might be less critical but can still help.
         try:
-            # Using a new Microphone instance for adjustment as it's a short operation
             with sr.Microphone(device_index=self.device_index) as source:
-                print(f"ASR: Adjusting for ambient noise for {duration}s...")
+                log.info(f"Adjusting for ambient noise.", duration=duration, mic_index=source.device_index)
                 await asyncio.to_thread(self.recognizer.adjust_for_ambient_noise, source, duration=duration)
-                print(f"ASR: Ambient noise adjustment complete. Energy threshold: {self.recognizer.energy_threshold:.2f}")
+                log.info(f"Ambient noise adjustment complete.", energy_threshold=f"{self.recognizer.energy_threshold:.2f}")
         except Exception as e:
-            print(f"ASR: Could not adjust for ambient noise: {e}")
+            log.error("Could not adjust for ambient noise.", error=str(e), exc_info=True)
 
+    async def _recognize_audio_async(self, audio_data: sr.AudioData) -> Optional[str]:
+        loop = asyncio.get_event_loop()
+        try:
+            text = await loop.run_in_executor(
+                None,
+                lambda: self.recognizer.recognize_google(audio_data, language=DEFAULT_LANGUAGE)
+            )
+            return text
+        except sr.UnknownValueError:
+            log.info("ASR: Google Speech Recognition could not understand audio.")
+            return None
+        except sr.RequestError as e:
+            log.error(f"ASR: Could not request results from Google service.", error=str(e))
+            return f"[ASR_REQUEST_ERROR:{e}]"
+        except Exception as e:
+            log.error(f"ASR: Unexpected error during speech recognition.", error=str(e), exc_info=True)
+            return f"[ASR_RECOGNIZE_ERROR:{e}]"
 
     async def listen_for_speech(
         self,
         silence_timeout: int = DEFAULT_SILENCE_TIMEOUT,
         phrase_time_limit: Optional[int] = DEFAULT_PHRASE_TIME_LIMIT
     ) -> AsyncGenerator[Optional[str], None]:
-
-        # print(f"ASR: Listening... (silence_timeout={silence_timeout}s, phrase_limit={phrase_time_limit}s)")
-
         audio_data: Optional[sr.AudioData] = None
-        # text_result: Optional[str] = None # Not needed here
-
         try:
-            # It's generally better to open the microphone context just before listening
-            # and close it afterwards, rather than keeping it open in self.microphone.
             with sr.Microphone(device_index=self.device_index) as source:
+                # log.debug(f"ASR: Listening on mic {source.device_index} (timeout={silence_timeout}s, phrase_limit={phrase_time_limit}s)...")
                 loop = asyncio.get_event_loop()
                 try:
-                    # print("ASR: Calling recognizer.listen...")
                     audio_data = await loop.run_in_executor(
-                        None, # Uses default ThreadPoolExecutor
+                        None,
                         lambda: self.recognizer.listen(
                             source,
                             timeout=silence_timeout,
                             phrase_time_limit=phrase_time_limit
                         )
                     )
-                    # print("ASR: recognizer.listen call returned.")
                 except sr.WaitTimeoutError:
-                    # print(f"ASR: No speech detected within {silence_timeout}s silence timeout (WaitTimeoutError).")
-                    yield "[ASR_SILENCE_TIMEOUT]" # Specific signal for silence timeout
+                    log.info("ASR: Silence timeout during listen.")
+                    yield "[ASR_SILENCE_TIMEOUT]"
                     return
 
             if audio_data:
-                # print("ASR: Audio captured, attempting recognition...")
-                try:
-                    text_result = await loop.run_in_executor( # loop already defined
-                        None,
-                        lambda: self.recognizer.recognize_google(audio_data, language=DEFAULT_LANGUAGE)
-                    )
-                    # print(f"ASR: Recognition result: '{text_result}'")
-                    yield text_result # Might be empty string if speech was unintelligible noise
-                except sr.UnknownValueError:
-                    # print("ASR: Google Speech Recognition could not understand audio.")
-                    yield "[ASR_UNKNOWN_VALUE]" # Audio was not intelligible speech
-                except sr.RequestError as e:
-                    print(f"ASR: Could not request results from Google service; {e}")
-                    yield f"[ASR_REQUEST_ERROR:{e}]"
-                except Exception as e: # Other unexpected errors during recognition
-                    print(f"ASR: Unexpected error during speech recognition: {e}")
-                    yield f"[ASR_RECOGNIZE_ERROR:{e}]"
-            else:
-                # This case should be hit if listen() returned None without WaitTimeoutError,
-                # or if WaitTimeoutError was not caught properly (it is now).
-                # print("ASR: No audio data captured (audio_data is None after listen).")
-                if not audio_data and silence_timeout: # If listen timed out but didn't raise WaitTimeoutError explicitly returning None
-                    yield "[ASR_SILENCE_TIMEOUT]" # Should be covered by WaitTimeoutError
+                # log.debug("ASR: Audio captured, attempting recognition.")
+                recognized_text = await self._recognize_audio_async(audio_data)
+                if recognized_text is None:
+                    yield "[ASR_UNKNOWN_VALUE]"
+                else:
+                    yield recognized_text
+            else: # Should ideally be caught by WaitTimeoutError
+                log.warn("ASR: No audio data captured, though WaitTimeoutError was not raised.")
+                if silence_timeout:
+                    yield "[ASR_SILENCE_TIMEOUT]"
                 else:
                     yield "[ASR_NO_AUDIO_CAPTURED]"
-
-        except Exception as e: # Errors related to microphone access or other setup
-            print(f"ASR: An error occurred in listen_for_speech (e.g., microphone issue): {e}")
+        except Exception as e:
+            log.error(f"ASR: Error in listen_for_speech (e.g., microphone access).", error=str(e), exc_info=True)
             yield f"[ASR_LISTEN_SETUP_ERROR:{e}]"
 
-        # The generator yields one result (text or signal or None) then stops.
+    async def transcribe_audio_frames(
+        self,
+        audio_frames_bytes: bytes,
+        sample_rate: int,
+        sample_width: int
+    ) -> Optional[str]:
+        if not audio_frames_bytes:
+            log.warn("ASR: No audio frames provided for transcription.")
+            return "[ASR_NO_FRAMES_PROVIDED]"
+
+        # log.debug(f"ASR: Transcribing frames.", num_bytes=len(audio_frames_bytes), sr=sample_rate, sw=sample_width)
+        try:
+            if not self.recognizer:
+                 log.error("ASR: Recognizer not initialized for transcribe_audio_frames.")
+                 raise ValueError("Recognizer not available in ASRService")
+
+            audio_data = sr.AudioData(audio_frames_bytes, sample_rate, sample_width)
+            recognized_text = await self._recognize_audio_async(audio_data)
+
+            if recognized_text is None:
+                return "[ASR_UNKNOWN_VALUE]"
+            return recognized_text
+
+        except ValueError as ve:
+            log.error("ASR: Error creating AudioData from frames.", error=str(ve), exc_info=True)
+            return "[ASR_AUDIODATA_ERROR]"
+        except Exception as e:
+            log.error("ASR: Error transcribing frames.", error=str(e), exc_info=True)
+            return f"[ASR_TRANSCRIBE_ERROR:{e}]"
 
 async def main_test_asr():
-    print("Starting ASR Test. Speak into the microphone. Say 'quitter' to exit.")
+    from dotenv import load_dotenv
+
+    # Ensure logging is set up for the test if run standalone
+    # This is a bit circular if logging_config itself is being tested,
+    # but for module tests, it's good to have consistent logging.
+    # If this script is run directly, logging_config.py might not have been imported by an entry point.
+    # However, get_logger() at module level in this file will use a basic config if none is set.
+    # For robust testing of this file standalone, explicitly set up:
+    # current_dir = Path(__file__).parent.resolve()
+    # project_root = current_dir.parent
+    # sys.path.insert(0, str(project_root))
+    # from src.logging_config import setup_logging as test_setup_logging
+    # test_setup_logging() # Use default console for test output clarity
+
+    log.info("Starting ASR Test. Speak into the microphone. Say 'quitter' to exit.")
     mic_idx = None
 
     try:
-        # Test if microphone is accessible at all
         with sr.Microphone(device_index=mic_idx) as m:
-            print(f"ASR Test: Using microphone: {m.device_index} (Sample rate: {m.SAMPLE_RATE}, Width: {m.SAMPLE_WIDTH})")
+            log.info(f"ASR Test: Using microphone.", mic_index=m.device_index, sample_rate=m.SAMPLE_RATE, sample_width=m.SAMPLE_WIDTH)
     except Exception as e_mic_init:
-        print(f"ASR Test: CRITICAL - Failed to initialize microphone (index {mic_idx if mic_idx is not None else 'Default'}). Error: {e_mic_init}")
-        print("Please ensure a microphone is connected and permissions are granted.")
-        print("You can list microphones using: `python -m speech_recognition`")
+        log.critical(f"ASR Test: Failed to initialize microphone.", mic_index=(mic_idx if mic_idx is not None else 'Default'), error=str(e_mic_init), exc_info=True)
+        print("CRITICAL: Mic init failed. Ensure mic connected & permissions granted. List mics via `python -m speech_recognition`", file=sys.stderr)
         return
 
     asr_service = ASRService(device_index=mic_idx)
-    # Optional: Perform one-time ambient noise adjustment if desired.
-    # await asr_service.adjust_for_ambient_noise(duration=1)
+    # await asr_service.adjust_for_ambient_noise(duration=1) # Optional
 
-    for i in range(5): # Run a few listen attempts
-        print(f"\nASR Test Attempt {i+1}/5: Speak now (or say 'quitter' to exit early)...")
-        final_text = None
-        async for text_chunk in asr_service.listen_for_speech(silence_timeout=5, phrase_time_limit=10):
-            final_text = text_chunk
+    for i in range(3):
+        log.info(f"ASR Test Attempt {i+1}/3 (Listen from Mic): Speak now...")
+        print(f"\nASR Test Attempt {i+1}/3: Speak now...") # User-facing prompt
+        final_text_mic = None
+        async for text_chunk in asr_service.listen_for_speech(silence_timeout=3, phrase_time_limit=5):
+            final_text_mic = text_chunk
             break
 
-        if final_text:
-            if final_text.startswith("[ASR_"):
-                print(f"ASR Test - Signal/Error: {final_text}")
-                if final_text == "[ASR_SILENCE_TIMEOUT]":
-                    print("ASR Test: Timeout - no speech detected in the allowed time.")
+        if final_text_mic:
+            if final_text_mic.startswith("[ASR_"):
+                log.warn("ASR Test (Mic) - Signal/Error.", signal=final_text_mic)
+                print(f"ASR Test (Mic) - Signal/Error: {final_text_mic}") # User-facing
             else:
-                print(f"ASR Test - Recognized: '{final_text}'")
-                if "quitter" in final_text.lower():
-                    print("ASR Test: 'quitter' detected. Exiting test loop.")
+                log.info("ASR Test (Mic) - Recognized.", text=final_text_mic)
+                print(f"ASR Test (Mic) - Recognized: '{final_text_mic}'") # User-facing
+                if "quitter" in final_text_mic.lower():
+                    log.info("ASR Test: 'quitter' detected. Exiting test loop.")
                     break
         else:
-            # This case (final_text is None) means the generator yielded an explicit None
-            print("ASR Test - No speech recognized or an unhandled None was yielded.")
+            log.warn("ASR Test (Mic) - No text or signal returned.")
+            print("ASR Test (Mic) - No text or signal returned.") # User-facing
 
-        if i < 4 : await asyncio.sleep(0.5) # Brief pause between attempts
+        if i < 2 : await asyncio.sleep(0.5)
 
-    print("\nASR Test finished.")
+    log.info("ASR Test: Testing transcribe_audio_frames with dummy (silent) audio data.")
+    print("\nASR Test: Testing transcribe_audio_frames with dummy (silent) audio data.") # User-facing
+    sr_test, sw_test, duration_test, num_channels_test = 16000, 2, 2, 1
+    silent_frames = b'\x00' * (sr_test * sw_test * num_channels_test * duration_test)
+
+    transcribed_from_frames = await asr_service.transcribe_audio_frames(silent_frames, sr_test, sw_test)
+    if transcribed_from_frames:
+        if transcribed_from_frames.startswith("[ASR_"):
+            log.info("ASR Test (from_frames) - Signal/Error for silent frames (expected).", signal=transcribed_from_frames)
+            print(f"ASR Test (from_frames) - Signal/Error for silent frames: '{transcribed_from_frames}' (This is expected)") # User-facing
+        else:
+            log.warn("ASR Test (from_frames) - Unexpectedly Recognized from silent frames.", text=transcribed_from_frames)
+            print(f"ASR Test (from_frames) - Unexpectedly Recognized: '{transcribed_from_frames}' from silent frames.") # User-facing
+    else:
+        log.error("ASR Test (from_frames) - Got None, expected specific ASR signal.")
+        print("ASR Test (from_frames) - Got None, expected signal like [ASR_UNKNOWN_VALUE].") # User-facing
+
+    log.info("ASR Test finished.")
+    print("\nASR Test finished.", file=sys.stderr)
+
 
 if __name__ == "__main__":
-    from dotenv import load_dotenv # For GEMINI_API_KEY if any part of ASR implicitly uses it (it shouldn't)
+    # Ensure .env is loaded for standalone test if any config is needed indirectly
     dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
-    if os.path.exists(dotenv_path):
-        load_dotenv(dotenv_path=dotenv_path)
-        # print(f"ASR Test: .env file loaded from {dotenv_path}")
-    else:
-        # print(f"ASR Test: Warning - .env file not found at {dotenv_path}.")
-        pass
+    if os.path.exists(dotenv_path): load_dotenv(dotenv_path=dotenv_path)
+
+    # Setup basic logging for standalone test if logging_config.py is not run by main app
+    # This helps see logs from get_logger(__name__) at the top of this file.
+    # If this file is run directly, `setup_logging()` from `logging_config` won't be called by an entry point.
+    # So, we do a minimal local setup for the test.
+    if not logging.getLogger().handlers: # Check if root logger has handlers
+        structlog.configure(
+            processors=[structlog.dev.ConsoleRenderer()],
+            logger_factory=structlog.stdlib.LoggerFactory(),
+            wrapper_class=structlog.stdlib.BoundLogger,
+            cache_logger_on_first_use=True,
+        )
+        logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), stream=sys.stdout)
+        log.info("Minimal logging configured for asr.py standalone test.")
+
 
     try:
         asyncio.run(main_test_asr())
     except KeyboardInterrupt:
-        print("\nASR Test ended by user.")
+        log.info("ASR Test ended by user.")
+        print("\nASR Test ended by user.", file=sys.stderr)
     except Exception as e:
-        print(f"ASR Test failed to run: {e}")
+        log.critical("ASR Test failed to run.", error=str(e), exc_info=True)
+        print(f"ASR Test failed to run: {e}", file=sys.stderr)
