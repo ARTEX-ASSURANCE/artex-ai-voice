@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "artex_agent"
+version = "0.2.0" # Current version was 0.1.0, this reflects significant new work
+authors = [
+  { name="AI Agent (Jules)", email="no-reply@example.com" },
+]
+description = "AI Voice Assistant for ARTEX ASSURANCES with Gemini, Database, and LiveKit integration."
+readme = "README.md"
+requires-python = ">=3.9" # Based on current dependencies like SQLAlchemy 2
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License", # Assuming MIT, adjust if different
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "python-dotenv==0.21.1",
+    "google-generativeai==0.7.1",
+    "SQLAlchemy[asyncio]==2.0.30",
+    "aiomysql==0.2.0",
+    "alembic==1.13.1",
+    "SpeechRecognition==3.10.4",
+    "PyAudio==0.2.14", # Note: PyAudio often needs system deps
+    "gTTS==2.5.1",
+    "pygame==2.5.2",
+    "google-cloud-texttospeech==2.14.0",
+    "pydub~=0.25",
+    "livekit==1.5.2", # Server SDK
+    "grpcio~=1.60",
+    "grpcio-tools~=1.60",
+    "protobuf~=4.25",
+    "fastapi==0.111.0",
+    "uvicorn[standard]==0.30.1",
+    "pydantic==2.8.2",
+    "structlog==24.2.0",
+    "cryptography==42.0.8",
+    "pytest==8.2.2",
+]
+
+[project.scripts]
+# Placeholder if we want a CLI entry point later
+# artex-agent = "artex_agent.cli:main"
+
+[project.urls]
+"Homepage" = "https://github.com/example/artex_agent" # Placeholder
+"Bug Tracker" = "https://github.com/example/artex_agent/issues" # Placeholder

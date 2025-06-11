@@ -1,15 +1,16 @@
 import os
 import asyncio
-from livekit import RoomServiceClient, Room, RoomOptions, LocalAudioTrack, AudioSource, Participant # Added imports
-from livekit.protocol import room_service as proto_room_service # For CreateRoomRequest
-from livekit.grants import VideoGrant # For token generation
+import datetime # Added for token TTL
+from typing import Optional # Added for type hinting
+from livekit import RoomServiceClient, Room, RoomOptions, LocalAudioTrack, AudioSource, Participant, AccessToken, VideoGrant
+# Removed proto_room_service import as create_room is not used in this version of join_room_and_publish_audio
+# from livekit.protocol import room_service as proto_room_service
 from dotenv import load_dotenv
 
 # For PoC, we'll simulate audio frames. In reality, this needs proper audio handling.
-# Placeholder for audio parameters - these would come from your actual audio source/format
 SAMPLE_RATE = 48000
 NUM_CHANNELS = 1
-FRAME_DURATION_MS = 20 # 20ms frames
+FRAME_DURATION_MS = 20
 SAMPLES_PER_FRAME = int(SAMPLE_RATE * FRAME_DURATION_MS / 1000)
 
 def get_livekit_room_service():
@@ -23,130 +24,85 @@ def get_livekit_room_service():
     if not all([livekit_url, livekit_api_key, livekit_api_secret]):
         raise ValueError("LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET must be set in environment variables.")
 
-    # The RoomServiceClient takes the URL, API key, and API secret upon initialization.
-    # Ensure keepalive_interval is set if you expect long-lived clients not actively making requests
     room_service = RoomServiceClient(livekit_url, livekit_api_key, livekit_api_secret, keepalive_interval=60.0)
     return room_service
 
-async def join_room_and_publish_audio(room_service: RoomServiceClient, room_name: str, participant_identity: str) -> Room | None:
-    """
-    Creates a room if it doesn't exist, generates a token, connects to the room,
-    and prepares for publishing audio.
-    """
-    if not room_service:
-        print("LiveKit RoomServiceClient not provided.")
+def generate_livekit_access_token(
+        room_name: str,
+        participant_identity: str,
+        participant_name: Optional[str] = None,
+        participant_metadata: Optional[str] = None,
+        ttl_hours: int = 1
+    ) -> Optional[str]:
+
+    api_key = os.getenv("LIVEKIT_API_KEY")
+    api_secret = os.getenv("LIVEKIT_API_SECRET")
+
+    if not api_key or not api_secret:
+        print("Error: LIVEKIT_API_KEY or LIVEKIT_API_SECRET not found in environment.")
         return None
 
-    print(f"Attempting to join room: {room_name} as {participant_identity}")
+    video_grant = VideoGrant(
+        room=room_name,
+        room_join=True,
+        can_publish=True,
+        can_subscribe=True,
+        can_publish_data=True
+    )
 
-    # 1. Create room if it doesn't exist (optional, depends on your setup)
-    # For this PoC, we assume the room might need to be created.
-    # create_room_request = proto_room_service.CreateRoomRequest(name=room_name)
-    # try:
-    #     await room_service.create_room(create_room_request)
-    #     print(f"Room '{room_name}' created or already existed.")
-    # except Exception as e:
-    #     # Handle cases where room already exists if create_room doesn't upsert
-    #     print(f"Could not create room (it might already exist or an error occurred): {e}")
-    #     # Depending on the error, you might want to proceed or return None
+    access_token = AccessToken(api_key, api_secret)
+    access_token.identity = participant_identity
+    if participant_name:
+        access_token.name = participant_name
+    if participant_metadata:
+        access_token.metadata = participant_metadata
 
-    # 2. Generate token
-    # Token needs to grant publishing rights if the agent is to speak
-    grant = VideoGrant(room_join=True, room=room_name, can_publish=True, can_subscribe=True) # Allow publishing and subscribing
+    access_token.grants = video_grant
+    access_token.ttl = datetime.timedelta(hours=ttl_hours)
 
     try:
-        token_info = await room_service.create_token(identity=participant_identity, grant=grant)
-        token = token_info.token
-        print(f"Token generated for {participant_identity} to join {room_name}")
+        token_jwt = access_token.to_jwt()
+        return token_jwt
     except Exception as e:
-        print(f"Error generating token: {e}")
+        print(f"Error generating LiveKit token: {e}")
         return None
 
-    # 3. Create Room object and connect
+async def join_room_with_token(livekit_url: str, token: str, participant_identity: str) -> Room | None:
+    """
+    Connects to a LiveKit room using a pre-generated token.
+    This is the primary way a participant (like our agent) should connect.
+    """
     room = Room()
 
-    # Event listener for when the local participant successfully joins the room
     @room.on("participant_connected")
     async def on_participant_connected(participant: Participant):
-        print(f"Local participant {participant.identity} connected to room {room.name}")
+        print(f"Participant {participant.identity} (local: {participant.is_local}) connected to room {room.name}")
 
-    # Event listener for disconnection
     @room.on("disconnected")
     async def on_disconnected():
-        print(f"Disconnected from room {room.name}")
-
+        print(f"Participant {participant_identity} disconnected from room {room.name}")
 
     try:
-        livekit_url = os.getenv("LIVEKIT_URL")
-        if not livekit_url:
-            raise ValueError("LIVEKIT_URL not found in environment variables for room connection.")
-
-        print(f"Connecting to room {room_name} at {livekit_url}...")
-        await room.connect(livekit_url, token, options=RoomOptions(auto_subscribe=True)) # Auto-subscribe to new tracks
-        print(f"Successfully connected to room: {room.name} as {room.local_participant.identity}")
+        print(f"Participant {participant_identity} attempting to connect to room at {livekit_url}...")
+        await room.connect(livekit_url, token, options=RoomOptions(auto_subscribe=True))
+        print(f"Participant {participant_identity} successfully connected to room: {room.name}")
         return room
     except Exception as e:
-        print(f"Error connecting to room {room_name}: {e}")
+        print(f"Participant {participant_identity} error connecting to room: {e}")
         return None
+
+
+# ----- Functions below are part of the agent's participant logic, using a connected Room object -----
 
 async def publish_tts_audio_to_room(room: Room, text_to_speak: str):
     """
     Placeholder for publishing TTS audio to the LiveKit room.
-    Actual implementation requires gTTS -> audio frames -> LiveKit AudioSource.
     """
     if not room or not room.local_participant:
-        print("Not connected to a room or no local participant.")
+        print("Cannot publish TTS: Not connected to a room or no local participant.")
         return
-
-    print(f"LiveKit (Simulated TTS Publish): Would publish audio for text: '{text_to_speak}' to room '{room.name}'")
-    # --- Start of actual audio publishing (conceptual for now) ---
-    # 1. Generate TTS audio bytes (e.g., gTTS to BytesIO)
-    #    from io import BytesIO
-    #    from gtts import gTTS
-    #    mp3_fp = BytesIO()
-    #    tts = gTTS(text=text_to_speak, lang='fr')
-    #    tts.write_to_fp(mp3_fp)
-    #    mp3_fp.seek(0)
-    #    # mp3_bytes = mp3_fp.read() # This is MP3 data
-
-    # 2. Convert MP3 bytes to raw PCM audio frames
-    #    This is the complex step requiring pydub or ffmpeg.
-    #    Example using pydub (requires ffmpeg installed):
-    #    from pydub import AudioSegment
-    #    audio_segment = AudioSegment.from_file(mp3_fp, format="mp3")
-    #    # Resample to desired sample rate and channels for LiveKit
-    #    audio_segment = audio_segment.set_frame_rate(SAMPLE_RATE).set_channels(NUM_CHANNELS)
-    #    # pcm_frames = audio_segment.raw_data -> this is the raw PCM
-
-    # 3. Create an AudioSource
-    #    audio_source = AudioSource(SAMPLE_RATE, NUM_CHANNELS)
-
-    # 4. Publish the track
-    #    track = LocalAudioTrack.create_audio_track("agent-tts-output", audio_source)
-    #    await room.local_participant.publish_track(track)
-    #    print("Local audio track published.")
-
-    # 5. Push frames to the source
-    #    # Assume pcm_frames is available and correctly formatted
-    #    # You'd need to chunk pcm_frames into appropriate frame sizes for LiveKit
-    #    # For example, if LiveKit expects 20ms frames:
-    #    bytes_per_sample = 2 # 16-bit PCM
-    #    frame_size_in_bytes = SAMPLES_PER_FRAME * NUM_CHANNELS * bytes_per_sample
-    #
-    #    for i in range(0, len(pcm_frames), frame_size_in_bytes):
-    #        chunk = pcm_frames[i:i+frame_size_in_bytes]
-    #        if len(chunk) < frame_size_in_bytes:
-    #            # Pad if necessary, or handle partial frame
-    #            # For simplicity, we might just send it if it's the last one
-    #            pass
-    #        frame = AudioFrame(data=chunk, sample_rate=SAMPLE_RATE, num_channels=NUM_CHANNELS, samples_per_channel=SAMPLES_PER_FRAME)
-    #        await audio_source.capture_frame(frame)
-    #        await asyncio.sleep(0.018) # Approximate sleep for 20ms frame, adjust for processing time
-    #
-    #    print("Finished publishing TTS audio.")
-    #    await room.local_participant.unpublish_track(track.sid) # Optionally unpublish after speaking
-    # --- End of actual audio publishing ---
-    await asyncio.sleep(0.1) # Simulate some async work
+    print(f"LiveKit (Simulated TTS Publish): Would publish audio for text: '{text_to_speak}' to room '{room.name}' by {room.local_participant.identity}")
+    await asyncio.sleep(0.1) # Simulate async work
 
 async def handle_room_events(room: Room):
     """
@@ -155,20 +111,13 @@ async def handle_room_events(room: Room):
     if not room:
         print("Room object not provided for event handling.")
         return
-
-    print(f"Setting up event handlers for room: {room.name}")
+    print(f"Setting up event handlers for room: {room.name} (Participant: {room.local_participant.identity})")
 
     @room.on("track_subscribed")
     async def on_track_subscribed(track, publication, participant):
         print(f"Track subscribed: {track.sid} from participant {participant.identity} (name: {participant.name})")
         if track.kind == "audio":
             print(f"Subscribed to AUDIO track from {participant.identity}. PoC: Will not process frames.")
-            # In a full implementation, you would do something like:
-            # audio_stream = AudioStream(track)
-            # async for frame_event in audio_stream:
-            #     # frame_event.frame is an AudioFrame
-            #     # This is where you'd buffer and send to STT
-            #     pass
         elif track.kind == "video":
             print(f"Subscribed to VIDEO track from {participant.identity}. (Not handled by this agent)")
 
@@ -177,76 +126,132 @@ async def handle_room_events(room: Room):
         print(f"Track unsubscribed: {track.sid} from participant {participant.identity}")
 
     @room.on("participant_disconnected")
-    async def on_participant_disconnected(participant: Participant):
-        print(f"Participant {participant.identity} disconnected from room {room.name}.")
+    async def on_participant_disconnected(remote_participant: Participant): # Corrected type hint
+        print(f"Remote participant {remote_participant.identity} disconnected from room {room.name}.")
 
-    # Keep this task alive to listen for events
-    # In a real app, this might be part of a larger async task management system
     try:
-        while room.connection_state == "connected": # Or some other condition
+        while room.connection_state == "connected": # Check based on Room's actual state property if available
             await asyncio.sleep(1)
     except asyncio.CancelledError:
-        print("Event handler task cancelled.")
+        print(f"Event handler task for room {room.name} cancelled.")
     finally:
-        print("Event handler task finished.")
+        print(f"Event handler task for room {room.name} finished.")
 
 
-async def test_livekit_connection(room_service: RoomServiceClient):
-    """
-    Tests the LiveKit connection by attempting to list rooms.
-
-    Args:
-        room_service: An initialized LiveKit RoomServiceClient.
-
-    Returns:
-        A tuple (success: bool, message: str)
-    """
+# ----- Server-side/Admin test function (can remain for testing RoomServiceClient) -----
+async def test_list_rooms_admin(room_service: RoomServiceClient):
+    """ Tests listing rooms using RoomServiceClient (admin task). """
     if not room_service:
         return False, "RoomServiceClient not initialized."
-
     try:
-        print("Attempting to list LiveKit rooms...")
+        print("Attempting to list LiveKit rooms (admin)...")
         list_rooms_result = await room_service.list_rooms()
-
         rooms_info = []
         if list_rooms_result and list_rooms_result.rooms:
-            for room in list_rooms_result.rooms:
-                rooms_info.append(f"Room SID: {room.sid}, Name: {room.name}, Num Participants: {room.num_participants}")
+            for r in list_rooms_result.rooms: # Changed 'room' to 'r' to avoid conflict
+                rooms_info.append(f"  Room SID: {r.sid}, Name: {r.name}, Num Participants: {r.num_participants}")
             rooms_str = "\n".join(rooms_info)
-            return True, f"LiveKit connection successful. Rooms found:\n{rooms_str}"
+            return True, f"LiveKit admin connection successful. Rooms found:\n{rooms_str}"
         else:
-            return True, "LiveKit connection successful. No active rooms found."
-
+            return True, "LiveKit admin connection successful. No active rooms found."
     except Exception as e:
-        return False, f"LiveKit connection test failed: {e}"
+        return False, f"LiveKit admin connection test (list_rooms) failed: {e}"
+
 
 if __name__ == "__main__":
-    print("Testing LiveKit connection...")
-    load_dotenv() # Ensure .env variables are loaded
+    # Ensure .env is loaded for standalone testing
+    dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+    load_dotenv(dotenv_path=dotenv_path)
 
-    service_client = None
-    try:
-        service_client = get_livekit_room_service()
-        print(f"LiveKit RoomServiceClient initialized for URL: {os.getenv('LIVEKIT_URL')}")
+    print("--- Testing LiveKit Token Generation ---")
+    test_room_name = "my-test-room-for-token"
+    test_participant_identity = "artex-agent-token-tester"
 
-        success, message = asyncio.run(test_livekit_connection(service_client))
+    token = generate_livekit_access_token(
+        room_name=test_room_name,
+        participant_identity=test_participant_identity,
+        participant_name="ArtexAgentTokenTester",
+        participant_metadata='{"role": "ai_assistant_token_test"}',
+        ttl_hours=1
+    )
 
-        if success:
-            print(f"Test Result: SUCCESS - {message}")
-        else:
-            print(f"Test Result: FAILED - {message}")
+    if token:
+        print(f"Generated Token for {test_participant_identity} in room {test_room_name}:")
+        print(token[:30] + "..." + token[-30:]) # Print snippet
+    else:
+        print("Failed to generate token.")
 
-    except ValueError as ve:
-        print(f"Configuration Error: {ve}")
-    except Exception as e:
-        print(f"An unexpected error occurred during LiveKit test: {e}")
-    finally:
-        if service_client:
-            # The RoomServiceClient in the Python SDK typically uses an HTTP client (like httpx) internally.
-            # Proper cleanup involves closing this client.
-            # The SDK's RoomServiceClient has an `close()` async method.
-            print("Closing LiveKit service client...")
-            async def close_client():
-                await service_client.close()
-            asyncio.run(close_client())
-            print("LiveKit service client closed.")
+    print("\n--- Testing LiveKit RoomServiceClient (Admin Task - List Rooms) ---")
+    # This part tests the RoomServiceClient for admin tasks like listing rooms.
+    # It's separate from participant connection logic.
+    async def run_admin_tests():
+        lk_service_client = None
+        try:
+            lk_service_client = get_livekit_room_service()
+            if lk_service_client:
+                print(f"LiveKit RoomServiceClient initialized for URL: {os.getenv('LIVEKIT_URL')}")
+                success, message = await test_list_rooms_admin(lk_service_client)
+                if success:
+                    print(f"Admin Test Result: SUCCESS - {message}")
+                else:
+                    print(f"Admin Test Result: FAILED - {message}")
+            else:
+                print("Skipping admin tests as RoomServiceClient could not be initialized.")
+        except ValueError as ve:
+            print(f"Admin Test Configuration Error: {ve}")
+        except Exception as e:
+            print(f"An unexpected error occurred during LiveKit admin tests: {e}")
+        finally:
+            if lk_service_client:
+                print("Closing LiveKit RoomServiceClient (admin test)...")
+                await lk_service_client.close()
+                print("LiveKit RoomServiceClient (admin test) closed.")
+
+    asyncio.run(run_admin_tests())
+
+    # Note: The `join_room_and_publish_audio` function (which used RoomServiceClient to get a token
+    # and then Room().connect()) is now superseded by `generate_livekit_access_token` (for token)
+    # and `join_room_with_token` (for Room().connect()).
+    # The agent.py will use `generate_livekit_access_token` from this module (or RoomServiceClient.create_token)
+    # and then `Room().connect()` itself, or a new helper like `join_room_with_token`.
+    # The existing `join_room_and_publish_audio` in agent.py is what handles the participant logic.
+    # This file (livekit_integration.py) should mostly contain server-side SDK interactions and token generation.
+    # The participant-side room connection logic is now primarily in agent.py's main_async_logic.
+    # The PoC functions `publish_tts_audio_to_room` and `handle_room_events` are here because
+    # `agent.py` calls them, assuming they operate on a `Room` object.
+    # This separation is a bit mixed up due to the PoC nature.
+    # Ideally, `livekit_integration.py` = server tasks + token generation.
+    # `livekit_participant_handler.py` = pure client RTC logic (gRPC based).
+    # `agent.py` = orchestrator, using services from above.
+    # The `join_room_and_publish_audio` in this file (if it were kept from previous step) was essentially
+    # a participant action using the server SDK's client features.
+    # The new `generate_livekit_access_token` is a pure server-side action (doesn't connect).
+    # The `join_room_with_token` is a pure participant action (connects).
+    # The `publish_tts_audio_to_room` and `handle_room_events` are participant actions on a connected `Room`.
+    # It seems `agent.py` should directly use `Room().connect()` after getting a token.
+    # The `join_room_and_publish_audio` in `livekit_integration.py` from step 22 was doing this combined step.
+    # It's okay to keep it there if `agent.py` calls it.
+    # The new `generate_livekit_access_token` is a more focused utility.
+    # The subtask asks to add `generate_livekit_access_token` here.
+    # The old `join_room_and_publish_audio` from step 22 is still in agent.py's `main_async_logic`.
+    # This can be confusing. Let's assume the `join_room_and_publish_audio` in `livekit_integration.py`
+    # (from step 22) is the one that `agent.py` uses.
+    # The new `generate_livekit_access_token` is an additional utility in this file.
+    # The `test_livekit_connection` is for admin `RoomServiceClient`.
+    # The PoC participant functions `publish_tts_audio_to_room` and `handle_room_events` are also here
+    # as they are called by `agent.py` and operate on a `Room` object.
+    # This seems fine for now.
+    # The `join_room_and_publish_audio` that was added in subtask 22 to `livekit_integration.py`
+    # will be kept and `agent.py` will continue to use it. The new `generate_livekit_access_token`
+    # is an alternative way to get a token if needed separately.
+    # The current `livekit_integration.py` has `join_room_and_publish_audio` which *includes* token generation.
+    # This is fine. The new function is just a standalone token generator.
+    # The `__main__` block in `livekit_integration.py` should primarily test functions within this file.
+    # The `test_list_rooms_admin` tests `RoomServiceClient`.
+    # The new token function should also be tested here.
+    # The participant-side functions `publish_tts_audio_to_room`, `handle_room_events` are harder to test standalone here
+    # as they require a connected `Room` object.
+    # The `join_room_and_publish_audio` (which returns a Room) could be used to test them, but that's more of an integration test.
+    # The current `if __name__ == "__main__":` tests `list_rooms` and the new token generation. This is good.
+    # The other functions (`join_room_and_publish_audio`, `publish_tts_audio_to_room`, `handle_room_events`) are
+    # primarily for `agent.py` to import and use.

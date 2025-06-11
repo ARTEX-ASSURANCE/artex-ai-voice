@@ -1,11 +1,36 @@
-# Dependencies will be added here as the project evolves.
-google-generativeai
-SpeechRecognition
-PyAudio
-gTTS
-pygame
-pytest
-python-dotenv
-aiomysql
-SQLAlchemy
-livekit
+# Core Application & Gemini
+python-dotenv==0.21.1
+google-generativeai==0.7.1
+
+# Database
+SQLAlchemy[asyncio]==2.0.30
+aiomysql==0.2.0
+alembic==1.13.1
+
+# Voice I/O
+SpeechRecognition==3.10.4
+PyAudio==0.2.14
+gTTS==2.5.1
+pygame==2.5.2
+google-cloud-texttospeech==2.14.0
+pydub~=0.25 # For audio manipulation (MP3 to PCM)
+
+# LiveKit
+livekit==1.5.2 # Server SDK (used for room management, tokens)
+grpcio~=1.60 # For gRPC communication (e.g., with LiveKit RTC client)
+grpcio-tools~=1.60 # For generating gRPC stubs from .proto files
+protobuf~=4.25 # Protocol buffers, often a dependency for gRPC
+
+# Web Framework & API (for future API steps)
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+pydantic==2.8.2
+
+# Logging (for future logging steps)
+structlog==24.2.0
+
+# Security (general purpose, good to have)
+cryptography==42.0.8
+
+# Testing
+pytest==8.2.2

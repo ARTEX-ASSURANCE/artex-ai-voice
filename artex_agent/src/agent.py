@@ -1,720 +1,395 @@
+# Standard library imports
 import os
-import google.generativeai as genai
-from dotenv import load_dotenv
-import speech_recognition as sr
-from gtts import gTTS
-import pygame
+import asyncio
 import tempfile
 import time
 import json
-import asyncio
-import src.database as database
-import src.livekit_integration as livekit_integration # Import LiveKit module
-import argparse # For command-line arguments
+import argparse
+import uuid # Added for generating claim IDs
+import datetime # Added for date_survenance in open_claim
 
-# Load environment variables from .env file
+# Third-party imports
+from dotenv import load_dotenv
+import speech_recognition as sr
+# from gtts import gTTS # gTTS is now used within TTSService
+import pygame
+from google.generativeai.types import Part # Added for constructing tool response parts
+from pathlib import Path # For TTSService path operations
+
+# Local application imports
+import src.database as database
+from src.database_repositories import ContratRepository, SinistreArthexRepository
+import src.livekit_integration as livekit_integration
+from src.gemini_client import GeminiClient
+from src.gemini_tools import ARGO_AGENT_TOOLS
+from src.asr import ASRService
+from src.tts import TTSService # Import the new TTSService
+from typing import Optional, List, Dict, Any
+
+# Load environment variables from .env file at the very beginning
 load_dotenv()
 
-ARTEX_CONTEXT_PROMPT = """Tu es un assistant virtuel pour ARTEX ASSURANCES.
-Tu es là pour aider les clients avec leurs questions sur les produits d'assurance (auto, habitation, santé, prévoyance, etc.) et les services associés.
-Réponds toujours en français, de manière professionnelle, courtoise et amicale.
-Fournis des informations claires et concises. Si une question est trop complexe ou sort de ton domaine de compétence, suggère poliment de contacter un conseiller ARTEX ASSURANCES.
-Ne donne pas de conseils financiers spécifiques, mais explique les caractéristiques des produits.
-Sois patient et empathique.
-Si tu n'es pas sûr de la réponse ou si la question de l'utilisateur est ambiguë, inclus la phrase '[CLARIFY]' au début de ta réponse, suivie de la question de clarification que tu souhaites poser à l'utilisateur. Par exemple: '[CLARIFY] Pourriez-vous préciser quel type d'assurance vous intéresse?'
-Si, même après une clarification, tu ne peux pas aider l'utilisateur ou si la situation est trop complexe ou sort de ton domaine d'expertise, inclus la phrase '[HANDOFF]' au début de ta réponse. Tu peux aussi suggérer un transfert si l'utilisateur le demande explicitement (par exemple, s'il dit "je veux parler à un humain").
+# --- Prompt Loading ---
+def load_prompt(file_name: str) -> str:
+    prompt_dir = os.path.join(os.path.dirname(__file__), '..', 'prompts')
+    file_path = os.path.join(prompt_dir, file_name)
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        print(f"CRITICAL Error: Prompt file {file_path} not found.")
+        if file_name == "system_context.txt":
+             raise SystemExit(f"CRITICAL: System context prompt {file_path} not found.")
+        return ""
+    except Exception as e:
+        print(f"CRITICAL Error: Failed to load prompt {file_name}: {e}")
+        if file_name == "system_context.txt":
+             raise SystemExit(f"CRITICAL: Failed to load system context prompt {file_name}: {e}")
+        return ""
 
-Instructions pour les opérations de base de données (Réponds uniquement avec le JSON si une telle action est demandée par l'utilisateur et que tu as les informations nécessaires, comme les IDs):
-Pour obtenir des détails sur une police, si l'utilisateur fournit un numéro de police, réponds avec un JSON: `{"action": "db_read", "operation": "get_policy_details", "params": {"policy_id": "ID_DE_LA_POLICE"}}`. Demande d'abord le numéro de police si non fourni.
-Pour mettre à jour les préférences e-mail d'un utilisateur (par exemple, s'il veut s'inscrire ou se désinscrire des mises à jour), réponds avec: `{"action": "db_edit", "operation": "update_user_preference", "params": {"user_id": "ID_UTILISATEUR", "receive_updates": true_ou_false}}`. Demande d'abord l'ID utilisateur si non fourni.
-"""
+ARTEX_SYSTEM_PROMPT = load_prompt("system_context.txt")
+if not ARTEX_SYSTEM_PROMPT:
+    pass
 
-# Global database engine instance
+# --- Global Instances ---
 db_engine = None
-
-# Global LiveKit instances
 livekit_room_service_client = None
-livekit_room_instance = None # Stores the connected Room object
-livekit_event_handler_task = None # Stores the asyncio task for LiveKit events
+livekit_room_instance = None
+livekit_event_handler_task = None
+gemini_chat_client: Optional[GeminiClient] = None
+asr_service_global: Optional[ASRService] = None
+tts_service_global: Optional[TTSService] = None # Global TTS service instance
+_pygame_mixer_initialized = False
+args = None
+input_mode = "voice"
 
+def configure_services():
+    global db_engine, livekit_room_service_client, gemini_chat_client, asr_service_global, tts_service_global
 
-def configure_gemini():
-    """
-    Configures the Gemini API key from the environment variable GEMINI_API_KEY.
-
-    Raises:
-        ValueError: If the GEMINI_API_KEY environment variable is not set.
-    """
-    global model, db_engine, livekit_room_service_client # Add livekit client
-    if model is None: # Configure only if not already configured
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY environment variable not set. Please set it before running the agent.")
-        genai.configure(api_key=api_key)
-        # Initialize the model here to be reused
+    if gemini_chat_client is None:
         try:
-            # For gemini-pro, system_instruction is a parameter for starting a chat or specific generation calls.
-            # We will prepend it to the prompt in generate_response for stateless calls.
-            # If we were using model.start_chat(), we could pass it there.
-            model = genai.GenerativeModel('gemini-pro')
+            gemini_chat_client = GeminiClient()
+            print("GeminiClient initialized successfully.")
         except Exception as e:
-            print(f"Error initializing the GenerativeModel: {e}")
+            print(f"CRITICAL: Failed to initialize GeminiClient: {e}")
             raise
 
-    # Initialize database engine if not already done
     if db_engine is None:
-        try:
-            db_engine = database.get_db_engine()
-            # Test DB connection once at startup (optional, can be noisy)
-            # print("Testing DB connection on startup...")
-            # test_success, test_msg = asyncio.run(database.test_database_connection(db_engine))
-            # print(f"DB startup test: {test_success} - {test_msg}")
-            print("Database engine initialized successfully in configure_gemini.")
-        except Exception as e:
-            print(f"Failed to initialize database engine in configure_gemini: {e}")
-            # db_engine will remain None, subsequent DB operations should fail gracefully
+        if database.db_engine_instance:
+            db_engine = database.db_engine_instance
+            print("Database engine (from database.py) configured successfully.")
+        else:
+            print("Warning: Database engine not available from database.py. DB operations will fail if attempted.")
 
     if livekit_room_service_client is None:
         try:
             livekit_room_service_client = livekit_integration.get_livekit_room_service()
-            print("LiveKit RoomServiceClient initialized successfully in configure_gemini.")
+            print("LiveKit RoomServiceClient initialized successfully.")
         except Exception as e:
-            print(f"Failed to initialize LiveKit RoomServiceClient in configure_gemini: {e}")
+            print(f"Warning: Failed to initialize LiveKit RoomServiceClient: {e}. LiveKit features unavailable.")
 
+    if asr_service_global is None:
+        try:
+            mic_idx = args.mic_index if args and hasattr(args, 'mic_index') else None
+            asr_service_global = ASRService(device_index=mic_idx)
+            print(f"ASRService initialized successfully (mic index: {mic_idx if mic_idx is not None else 'Default'}).")
+        except Exception as e:
+            print(f"Warning: Failed to initialize ASRService: {e}. Voice input may not work as expected.")
+            asr_service_global = None
 
-def generate_response(prompt: str) -> str:
-    """
-    Generates a response from the Gemini model.
+    if tts_service_global is None:
+        try:
+            tts_service_global = TTSService()
+            print("TTSService initialized successfully.")
+        except Exception as e:
+            print(f"Warning: Failed to initialize TTSService: {e}. TTS output may not work.")
+            tts_service_global = None
 
-    Args:
-        prompt: The user's input prompt.
+async def generate_agent_response(
+    conversation_history: List[Dict[str, Any]],
+    tools_list: Optional[List[Tool]] = None
+    ) -> Any:
+    global gemini_chat_client
+    if not gemini_chat_client:
+        return "Erreur: Le client Gemini n'est pas initialisé. Veuillez redémarrer l'agent."
 
-    Returns:
-        The model's text response.
-    """
-    global model
-    if model is None:
-        # This ensures configuration is called if generate_response is called directly
-        # or if the initial configuration in main failed silently (though it shouldn't with current error handling)
-        print("Model not configured. Attempting to configure...")
-        configure_gemini()
-        if model is None: # If it's still None after trying to configure, something is wrong.
-             return "Error: Model could not be initialized. Please check API key and configuration."
-
-    # Combine context, French instruction, and user prompt
-    # The "Assistant:" part helps guide the model to start its response.
-    full_prompt = f"{ARTEX_CONTEXT_PROMPT}\n---\nRéponds en français à la question suivante :\nUtilisateur: {prompt}\nAssistant:"
+    final_tools = tools_list if tools_list is not None else ARGO_AGENT_TOOLS
 
     try:
-        # It's good practice to log the full prompt for debugging if issues occur
-        # print(f"DEBUG: Full prompt sent to Gemini:\n{full_prompt}")
-        response = model.generate_content(full_prompt)
-        return response.text
+        gemini_response_obj = await gemini_chat_client.generate_text_response(
+            prompt_parts=conversation_history,
+            system_instruction=ARTEX_SYSTEM_PROMPT,
+            tools_list=final_tools_list
+        )
+        return gemini_response_obj
     except Exception as e:
-        print(f"Error generating response from API: {e}")
-        return "Error: Could not get a response from the model."
+        print(f"Error in generate_agent_response: {e}")
+        return "Erreur: Impossible d'obtenir une réponse du modèle IA."
 
-def listen_and_transcribe_french() -> str | None:
-    """
-    Listens for audio input via microphone and transcribes it to French text.
-
-    Returns:
-        The transcribed text as a string, or None if recognition fails.
-    """
-    r = sr.Recognizer()
-    with sr.Microphone() as source:
-        print("Parlez maintenant...")
-        try:
-            # Adjust for ambient noise for 1 second
-            r.adjust_for_ambient_noise(source, duration=1)
-            # Listen for audio input
-            audio = r.listen(source, timeout=5, phrase_time_limit=10) # Added timeout and phrase_time_limit
-            print("Transcription en cours...")
-            # Recognize speech using Google Web Speech API
-            text = r.recognize_google(audio, language='fr-FR')
-            print(f"Vous (voix): {text}")
-            return text
-        except sr.WaitTimeoutError:
-            print("Agent (ARTEX): Aucun son détecté. Veuillez réessayer ou taper votre requête.")
-            return None
-        except sr.UnknownValueError:
-            print("Agent (ARTEX): Désolé, je n'ai pas compris ce que vous avez dit. Veuillez réessayer ou taper votre requête.")
-            return None
-        except sr.RequestError as e:
-            print(f"Agent (ARTEX): Erreur de service de reconnaissance vocale; {e}. Veuillez vérifier votre connexion ou taper votre requête.")
-            return None
-        except Exception as e:
-            print(f"Agent (ARTEX): Une erreur est survenue lors de la reconnaissance vocale: {e}. Veuillez réessayer ou taper votre requête.")
-            return None
-
-def speak_french(text: str):
-    """
-    Converts text to speech in French and plays it.
-    Ensures pygame.mixer is initialized.
-    """
-    global _pygame_mixer_initialized, livekit_room_instance
-
-    if livekit_room_instance:
-        print(f"Agent (LiveKit TTS - Sim): {text}")
-        # For PoC, directly call the async function using asyncio.run() from the sync context.
-        # This is a simplification. In a full async app, you'd await it.
-        try:
-            asyncio.run(livekit_integration.publish_tts_audio_to_room(livekit_room_instance, text))
-        except Exception as e:
-            print(f"Error during simulated LiveKit TTS publish: {e}")
-        return # Skip pygame playback if in LiveKit mode
-
-    # Fallback to pygame if not in LiveKit mode or if livekit_room_instance is None
+def play_audio_pygame(filepath: str):
+    global _pygame_mixer_initialized
     if not _pygame_mixer_initialized:
         try:
             pygame.mixer.init()
             _pygame_mixer_initialized = True
+            # print("Pygame mixer initialized for audio playback.")
         except pygame.error as e:
-            print(f"Agent (ARTEX): Erreur lors de l'initialisation de pygame.mixer: {e}. La parole ne sera pas jouée.")
+            print(f"Agent (ARTEX): Pygame mixer init error: {e}. Cannot play audio.")
             return
 
-    if not text:
-        print("Agent (ARTEX): Pas de texte à vocaliser.")
+    if not Path(filepath).exists():
+        print(f"Agent (ARTEX): Audio file not found: {filepath}")
         return
 
     try:
-        tts = gTTS(text=text, lang='fr', slow=False)
-        with tempfile.NamedTemporaryFile(suffix='.mp3', delete=True) as tmpfile:
-            temp_filename = tmpfile.name
-            tts.save(temp_filename)
-            pygame.mixer.music.load(temp_filename)
-            pygame.mixer.music.play()
-            while pygame.mixer.music.get_busy():
-                pygame.time.Clock().tick(10)
-    except RuntimeError as re:
-        print(f"Agent (ARTEX): Erreur gTTS (RuntimeError): {re}. Assurez-vous qu'il y a du texte à dire.")
+        pygame.mixer.music.load(filepath)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            pygame.time.Clock().tick(10)
+    except pygame.error as e:
+        print(f"Agent (ARTEX): Pygame error playing audio {filepath}: {e}")
     except Exception as e:
-        print(f"Agent (ARTEX): Erreur lors de la génération ou de la lecture de la parole: {e}")
+        print(f"Agent (ARTEX): Unexpected error playing audio {filepath}: {e}")
 
+def speak_text_output(text_to_speak: str):
+    global livekit_room_instance, tts_service_global
 
-async def main_async_logic(args):
-    """Main asynchronous logic for the agent, especially when LiveKit is involved."""
-    global livekit_room_instance, livekit_event_handler_task, input_mode
+    if not text_to_speak:
+        print("Agent (ARTEX): No text to speak.")
+        return
 
-    if args.livekit_room:
-        if not livekit_room_service_client:
-            print("LiveKit service client not initialized. Cannot join room.")
-            return # Or raise an error
+    if not tts_service_global:
+        print("Agent (ARTEX): TTS Service not available. Cannot speak.")
+        print(f"Agent (ARTEX) (fallback print): {text_to_speak}") # Fallback to print
+        return
 
-        livekit_room_instance = await livekit_integration.join_room_and_publish_audio(
-            livekit_room_service_client,
-            args.livekit_room,
-            args.livekit_identity
-        )
+    mp3_filepath = None
+    try:
+        mp3_filepath = asyncio.run(tts_service_global.get_speech_audio_filepath(text_to_speak))
+    except Exception as e:
+        print(f"Agent (ARTEX): Error getting speech audio filepath from TTSService: {e}")
+        print(f"Agent (ARTEX) (fallback print after TTS error): {text_to_speak}")
+        return
+
+    if mp3_filepath:
         if livekit_room_instance:
-            print(f"Successfully joined LiveKit room: {args.livekit_room}")
-            # Start the event handler as a background task
-            livekit_event_handler_task = asyncio.create_task(
-                livekit_integration.handle_room_events(livekit_room_instance)
-            )
-            input_mode = "text" # Default to text input when in LiveKit mode for PoC
-            print("Agent en mode LiveKit. Saisie vocale simulée par entrée texte.")
+            print(f"Agent (LiveKit TTS - Sim): Text '{text_to_speak}' generated to {mp3_filepath}. Would publish to LiveKit.")
+            try:
+                asyncio.run(livekit_integration.publish_tts_audio_to_room(livekit_room_instance, text_to_speak))
+            except Exception as e:
+                print(f"Error during (simulated) LiveKit TTS publish: {e}")
         else:
-            print(f"Could not join LiveKit room: {args.livekit_room}. Falling back to CLI mode.")
-            # Fallback or exit, depending on desired behavior
+            play_audio_pygame(mp3_filepath)
+    else:
+        print(f"Agent (ARTEX): TTS failed to generate audio file for: {text_to_speak}")
+        print(f"Agent (ARTEX) (fallback print after TTS failure): {text_to_speak}")
 
-    # The main conversation loop (adapted for async if other parts become async)
-    # For now, the loop itself remains synchronous and uses asyncio.run for async parts.
-    # This is a PoC simplification. A fully async app would structure this differently.
-
-    # The existing main loop logic will run here.
-    # If livekit_room_instance is set, listen_and_transcribe_french and speak_french will behave differently.
-    # For this PoC, the loop from the original `if __name__ == "__main__":` will be mostly reused,
-    # with modifications inside listen_and_transcribe_french and speak_french.
-
-    # The loop needs to be here or called from here if main functions are to be async.
-    # Due to pygame and input() being sync, a fully async loop is complex.
-    # We'll keep the existing loop structure and adapt I/O functions.
+async def main_async_logic():
+    global livekit_room_instance, livekit_event_handler_task, input_mode, args
+    if args and args.livekit_room:
+        if not livekit_room_service_client: print("LiveKit service client non initialisé."); return
+        livekit_room_instance = await livekit_integration.join_room_and_publish_audio(
+            livekit_room_service_client, args.livekit_room, args.livekit_identity)
+        if livekit_room_instance:
+            print(f"Connecté avec succès à la room LiveKit: {args.livekit_room}")
+            livekit_event_handler_task = asyncio.create_task(livekit_integration.handle_room_events(livekit_room_instance))
+            input_mode = "text"; print("Agent en mode LiveKit. Saisie vocale simulée par entrée texte.")
+        else:
+            print(f"Impossible de rejoindre la room LiveKit: {args.livekit_room}. Retour au mode CLI.")
     run_cli_conversation_loop()
 
-
 def run_cli_conversation_loop():
-    global input_mode # Allow this function to modify the global input_mode
+    global input_mode, args, current_conversation_history
 
-    # This is the original main loop, refactored into a function
-    # It will be called by main_async_logic or directly by if __name__ == "__main__"
-    # if LiveKit is not used.
+    if not livekit_room_instance:
+        print("Dites quelque chose (ou tapez 'texte', 'exit'/'quit').")
+        if input_mode == "voice": print("Vous pouvez aussi taper 'texte' pour passer en mode saisie manuelle.")
+    else:
+        print(f"Mode LiveKit actif. Tapez messages pour '{args.livekit_identity_cli_prompt}'. Tapez 'exit' ou 'quit' pour terminer.")
 
-    print("Dites quelque chose (ou tapez 'texte' pour saisie manuelle, 'exit'/'quit' pour terminer).")
-    if not livekit_room_instance: # Only show this if not in LiveKit mode, where text is default for PoC
-        print("Vous pouvez aussi taper 'texte' pour passer en mode saisie manuelle.")
-
+    current_conversation_history = []
 
     while True:
         user_input = None
         if livekit_room_instance:
-            # In LiveKit mode, PoC simulates STT via text input
-            print("Agent (LiveKit - Simulant STT): Entrez le texte de l'utilisateur:")
-            user_input = input(f"Vous ({args.livekit_identity_cli_prompt if args.livekit_room else 'texte'}): ")
-            if user_input.lower() == 'voix': # Not applicable in LiveKit PoC mode
-                print("Agent (ARTEX): Le mode vocal direct est remplacé par la simulation LiveKit.")
-                user_input = "" # Clear to avoid processing 'voix' as query
+            user_input = input(f"Vous ({args.livekit_identity_cli_prompt if args and args.livekit_room else 'texte'}): ")
         elif input_mode == "voice":
-            transcribed_text = listen_and_transcribe_french()
-            # ... (rest of the voice input logic from original main)
-            if transcribed_text:
-                user_input = transcribed_text
+            if not asr_service_global:
+                print("Agent (ARTEX): Service ASR non disponible. Passage en mode texte.")
+                input_mode = "text"; continue
+            print("Agent (ARTEX): Parlez maintenant...")
+            user_input_text_chunk = None
+            async def get_asr_input():
+                async for text_result in asr_service_global.listen_for_speech(): return text_result
+                return None
+            user_input_text_chunk = asyncio.run(get_asr_input())
+            if user_input_text_chunk and not user_input_text_chunk.startswith("[ASR_"):
+                print(f"Vous (voix): {user_input_text_chunk}"); user_input = user_input_text_chunk
             else:
-                choice = input("Agent (ARTEX): Problème avec la reconnaissance vocale. Taper 'texte' pour saisie manuelle, ou appuyez sur Entrée pour réessayer la voix: ").lower()
-                if choice == 'texte':
-                    input_mode = "text"
-                    print("Agent (ARTEX): Mode de saisie par texte activé.")
-                    continue
-                else:
-                    continue
-
-        if input_mode == "text" and not livekit_room_instance : # Standard text input if not LiveKit
+                if user_input_text_chunk == "[ASR_SILENCE_TIMEOUT]": print("Agent (ARTEX): Aucun son détecté.")
+                elif user_input_text_chunk == "[ASR_UNKNOWN_VALUE]": print("Agent (ARTEX): Je n'ai pas compris.")
+                elif user_input_text_chunk and user_input_text_chunk.startswith("[ASR_REQUEST_ERROR"): print(f"Agent (ARTEX): Erreur ASR: {user_input_text_chunk}")
+                elif user_input_text_chunk: print(f"Agent (ARTEX): Signal ASR: {user_input_text_chunk}")
+                else: print("Agent (ARTEX): Problème reconnaissance vocale.")
+                choice = input("Agent (ARTEX): Réessayer (Entrée) ou 'texte'? ").lower()
+                if choice == 'texte': input_mode = "text"; print("Agent (ARTEX): Mode texte.")
+                continue
+        elif input_mode == "text":
             user_input = input("Vous (texte): ")
-            if user_input.lower() == 'voix':
-                input_mode = "voice"
-                print("Agent (ARTEX): Mode de saisie vocale activé.")
-                continue
+            if user_input.lower() == 'voix': input_mode = "voice"; print("Agent (ARTEX): Mode vocal."); continue
 
-        # ... (The rest of the extensive main loop logic from the previous version) ...
-        # This includes:
-        #   - if user_input:
-        #   -   if user_input.lower() in ['exit', 'quit']: ... break
-        #   -   if not user_input.strip(): ... continue
-        #   -   original_user_query = user_input
-        #   -   agent_response_text = generate_response(original_user_query)
-        #   -   JSON parsing for DB actions
-        #   -   HANDOFF/CLARIFY checks
-        #   -   speak_french(final_response)
-        # This entire block needs to be here. For brevity in diff, it's not repeated.
-        # Ensure this logic is correctly placed within run_cli_conversation_loop.
-        # For this PoC, I will paste the relevant part of the loop here.
+        if not user_input: continue
+        if user_input.lower() in ['exit', 'quit']: print("Au revoir!"); break
+        if not user_input.strip() and not livekit_room_instance: print("Agent (ARTEX): Demande vide."); continue
 
-        if user_input:
-            if user_input.lower() in ['exit', 'quit']:
-                print("Au revoir!")
-                break
-            if not user_input.strip():
-                print("Agent (ARTEX): Veuillez entrer une demande valide.")
-                continue
+        print("Agent (ARTEX): ...pense...")
+        if not current_conversation_history or current_conversation_history[-1]['role'] == 'function':
+            current_conversation_history.append({'role': 'user', 'parts': [{'text': user_input}]})
+        else: current_conversation_history = [{'role': 'user', 'parts': [{'text': user_input}]}]
 
-            original_user_query = user_input
-            print("Agent (ARTEX): ...pense...")
-            agent_response_text = generate_response(original_user_query)
+        gemini_response_object = asyncio.run(generate_agent_response(current_conversation_history))
+        agent_response_text = ""; function_call_to_process = None
 
-            try:
-                if agent_response_text.strip().startswith("```json"):
-                    cleaned_response_text = agent_response_text.strip().replace("```json", "").replace("```", "").strip()
-                    parsed_action = json.loads(cleaned_response_text)
-                elif agent_response_text.strip().startswith("{"):
-                    parsed_action = json.loads(agent_response_text)
+        if isinstance(gemini_response_object, str): agent_response_text = gemini_response_object
+        elif gemini_response_object.candidates and gemini_response_object.candidates[0].content and gemini_response_object.candidates[0].content.parts:
+            for part in gemini_response_object.candidates[0].content.parts:
+                if part.function_call: function_call_to_process = part.function_call; break
+            if not function_call_to_process: agent_response_text = gemini_response_object.text if gemini_response_object.text else "[GEMINI_NO_TEXT]"
+        else: agent_response_text = gemini_response_object.text if gemini_response_object.text else "[GEMINI_EMPTY_CANDIDATE]"
+
+        if function_call_to_process:
+            tool_name = function_call_to_process.name
+            tool_args = dict(function_call_to_process.args)
+            print(f"DEBUG: Gemini Function Call: {tool_name} with args {tool_args}")
+            current_conversation_history.append({'role': 'model', 'parts': [Part(function_call=function_call_to_process)]})
+            function_response_content = {"error": f"Outil {tool_name} inconnu."}
+
+            if not db_engine or not database.AsyncSessionFactory:
+                function_response_content = {"error": "DB non configurée."}
+            elif tool_name == "get_contrat_details":
+                # ... (logic for get_contrat_details as previously defined) ...
+                numero_contrat = tool_args.get("numero_contrat")
+                if numero_contrat:
+                    async def _get_details():
+                        async with database.AsyncSessionFactory() as session:
+                            repo = ContratRepository(session)
+                            data = await repo.get_contrat_details_for_function_call(numero_contrat)
+                            return data if data else {"error": f"Contrat non trouvé: {numero_contrat}."}
+                    function_response_content = asyncio.run(_get_details())
                 else:
-                    parsed_action = None
-            except json.JSONDecodeError:
-                parsed_action = None
+                    function_response_content = {"error": "Numéro de contrat manquant."}
+            elif tool_name == "open_claim":
+                # ... (logic for open_claim as previously defined) ...
+                numero_contrat = tool_args.get("numero_contrat")
+                type_sinistre = tool_args.get("type_sinistre")
+                description_sinistre = tool_args.get("description_sinistre")
+                date_survenance_str = tool_args.get("date_survenance")
+                if numero_contrat and type_sinistre and description_sinistre:
+                    async def _open_claim_op():
+                        async with database.AsyncSessionFactory() as session:
+                            contrat_repo = ContratRepository(session)
+                            contrat = await contrat_repo.get_contrat_by_numero_contrat(numero_contrat)
+                            if contrat and contrat.id_adherent_principal is not None and contrat.id_contrat is not None:
+                                sinistre_repo = SinistreArthexRepository(session)
+                                claim_id_ref_str = f"CLAIM-{uuid.uuid4().hex[:8].upper()}"
+                                sinistre_data = {
+                                    "claim_id_ref": claim_id_ref_str, "id_contrat": contrat.id_contrat,
+                                    "id_adherent": contrat.id_adherent_principal, "type_sinistre": type_sinistre,
+                                    "description_sinistre": description_sinistre,
+                                }
+                                if date_survenance_str:
+                                    try: sinistre_data["date_survenance"] = datetime.date.fromisoformat(date_survenance_str)
+                                    except ValueError: return {"error": f"Format date invalide: '{date_survenance_str}'."}
+                                new_sinistre = await sinistre_repo.create_sinistre_arthex(sinistre_data)
+                                await session.commit()
+                                return {"id_sinistre_arthex": new_sinistre.id_sinistre_arthex, "claim_id_ref": new_sinistre.claim_id_ref, "message": "Déclaration enregistrée."}
+                            return {"error": f"Contrat {numero_contrat} non trouvé."}
+                    try: function_response_content = asyncio.run(_open_claim_op())
+                    except Exception as e: function_response_content = {"error": f"Erreur interne ouverture sinistre: {e}"}
+                else: function_response_content = {"error": "Infos manquantes pour ouvrir sinistre."}
 
-            if parsed_action and "action" in parsed_action:
-                action_type = parsed_action.get("action")
-                operation = parsed_action.get("operation")
-                params = parsed_action.get("params", {})
-                final_agent_response_for_user = ""
+            current_conversation_history.append({'role': 'function', 'parts': [Part(function_response={"name": tool_name, "response": function_response_content})]})
+            print(f"Agent (ARTEX): ...pense (après outil {tool_name})...")
+            final_gemini_response_obj = asyncio.run(generate_agent_response(current_conversation_history))
+            if isinstance(final_gemini_response_obj, str): agent_response_text = final_gemini_response_obj
+            elif final_gemini_response_obj.text: agent_response_text = final_gemini_response_obj.text
+            else: agent_response_text = "[GEMINI_NO_TEXT_POST_FUNC]"
+            current_conversation_history = []
 
-                if not db_engine:
-                    error_message = "Désolé, je ne peux pas accéder à la base de données pour le moment en raison d'un problème de configuration."
-                    print(f"Agent (ARTEX) (erreur): {error_message}")
-                    speak_french(error_message)
-                    continue
+        agent_response = agent_response_text
+        if agent_response.startswith("[HANDOFF]"):
+            handoff_msg = agent_response.replace("[HANDOFF]", "").strip() or "Je vous mets en relation avec un conseiller."
+            print(f"Agent (ARTEX): {handoff_msg}"); speak_text_output(handoff_msg)
+            print("Conversation terminée (handoff)."); break
+        elif agent_response.startswith("[CLARIFY]"):
+            clarify_q = agent_response.replace("[CLARIFY]", "").strip()
+            print(f"Agent (ARTEX) précisions: {clarify_q}"); speak_text_output(clarify_q)
+            current_conversation_history.append({'role': 'model', 'parts': [{'text': agent_response}]})
+            user_clarification = None; current_clar_mode = input_mode
+            if livekit_room_instance:
+                 print("Clarification (LiveKit - Sim):"); user_clarification = input(f"Vous ({args.livekit_identity_cli_prompt if args else 'User'} - précision): ")
+            elif current_clar_mode == "voice":
+                # ... (voice clarification input logic as before) ...
+                print("Veuillez fournir votre précision oralement:")
+                async def get_clar_input():
+                    async for text_res in asr_service_global.listen_for_speech(): return text_res
+                    return None
+                user_clarification = asyncio.run(get_clar_input())
+                if not user_clarification or user_clarification.startswith("[ASR_"): # Simplified error check
+                    print("Agent: Non compris. Essayez texte?"); user_clarification = None # Fallback or retry
+            if not user_clarification and (current_clar_mode == "text" or (livekit_room_instance and not user_clarification)): # Prompt if still no clarification
+                 user_clarification = input(f"Vous (précision texte): ")
 
-                if action_type == "db_read" and operation == "get_policy_details":
-                    policy_id = params.get("policy_id")
-                    if policy_id:
-                        print(f"Agent (ARTEX): Recherche des détails de la police {policy_id}...")
-                        try:
-                            policy_data = asyncio.run(database.get_policy_details(db_engine, policy_id))
-                            if policy_data:
-                                db_result_prompt = f"L'utilisateur a demandé des informations sur sa police '{policy_id}'. Les données de la base de données sont: {json.dumps(policy_data)}. Formule une réponse concise et informative en français pour l'utilisateur, présentant ces détails de manière claire."
-                            else:
-                                db_result_prompt = f"L'utilisateur a demandé des détails pour la police ID '{policy_id}', mais aucune police correspondante n'a été trouvée dans la base de données. Informe l'utilisateur de cela en français et demande s'il souhaite essayer un autre ID ou obtenir de l'aide pour autre chose."
-                        except Exception as db_e:
-                            print(f"Erreur lors de l'accès à la base de données pour get_policy_details (policy_id: {policy_id}): {db_e}")
-                            db_result_prompt = f"Une erreur s'est produite lors de la tentative de récupération des détails de la police ID '{policy_id}'. Informe l'utilisateur en français qu'il y a eu un problème technique et suggère de réessayer plus tard ou de contacter le support si le problème persiste."
-                        final_agent_response_for_user = generate_response(db_result_prompt)
-                    else:
-                        final_agent_response_for_user = "Je n'ai pas reçu de numéro de police à rechercher. Pourriez-vous me le fournir s'il vous plaît?"
+            if user_clarification:
+                current_conversation_history.append({'role': 'user', 'parts': [{'text': user_clarification}]})
+                print("Agent (ARTEX): ...pense (avec précision)...")
+                clar_response_obj = asyncio.run(generate_agent_response(current_conversation_history))
+                # ... (process clar_response_obj for HANDOFF/CLARIFY or final text) ...
+                final_text = ""
+                if isinstance(clar_response_obj, str): final_text = clar_response_obj
+                elif clar_response_obj.text: final_text = clar_response_obj.text
+                else: final_text = "[GEMINI_NO_TEXT_POST_CLARIFY]"
 
-                elif action_type == "db_edit" and operation == "update_user_preference":
-                    user_id = params.get("user_id")
-                    receive_updates = params.get("receive_updates")
-                    if user_id is not None and isinstance(receive_updates, bool):
-                        print(f"Agent (ARTEX): Mise à jour des préférences pour l'utilisateur {user_id} à {receive_updates}...")
-                        try:
-                            success = asyncio.run(database.update_user_preference(db_engine, user_id, receive_updates))
-                            if success:
-                                db_result_prompt = f"La préférence de l'utilisateur '{user_id}' pour recevoir des mises à jour par e-mail (receive_updates) a été mise à jour avec succès à la valeur '{receive_updates}'. Confirme cela à l'utilisateur en français de manière claire et positive."
-                            else:
-                                db_result_prompt = f"La tentative de mise à jour des préférences e-mail pour l'utilisateur '{user_id}' à la valeur '{receive_updates}' n'a pas pu être confirmée (il se peut que l'utilisateur n'existe pas ou que la préférence était déjà cette valeur). Informe l'utilisateur et demande s'il veut vérifier l'ID utilisateur."
-                        except Exception as db_e:
-                            print(f"Erreur lors de l'accès à la base de données pour update_user_preference (user_id: {user_id}): {db_e}")
-                            db_result_prompt = f"La tentative de mise à jour des préférences e-mail pour l'utilisateur '{user_id}' a échoué en raison d'un problème technique. Informe l'utilisateur de cet échec en français et suggère de réessayer plus tard."
-                        final_agent_response_for_user = generate_response(db_result_prompt)
-                    else:
-                        final_agent_response_for_user = "Les informations fournies pour la mise à jour des préférences sont incomplètes ou incorrectes. J'ai besoin d'un ID utilisateur valide et d'un choix clair (oui ou non) pour les mises à jour par e-mail."
-                else:
-                    final_agent_response_for_user = "J'ai reçu une instruction pour interagir avec la base de données que je ne reconnais pas. Pourriez-vous reformuler votre demande?"
-
-                if final_agent_response_for_user.startswith("[HANDOFF]"):
-                    handoff_msg = final_agent_response_for_user.replace("[HANDOFF]", "").strip() or "Il semble que j'aie besoin de transférer votre demande à un conseiller."
-                    print(f"Agent (ARTEX): {handoff_msg}")
-                    speak_french(handoff_msg)
-                    print("Conversation terminée après tentative d'opération DB.")
-                    break
-                elif final_agent_response_for_user.startswith("[CLARIFY]"):
-                    clarify_msg = final_agent_response_for_user.replace("[CLARIFY]", "").strip()
-                    handoff_msg = f"Agent (ARTEX): Pour mieux vous aider avec cela, il serait préférable de parler à un conseiller. {clarify_msg}"
-                    print(handoff_msg)
-                    speak_french(handoff_msg)
-                    print("Conversation terminée, clarification requise après opération DB.")
-                    break
-                else:
-                    print(f"Agent (ARTEX) (texte): {final_agent_response_for_user}")
-                    speak_french(final_agent_response_for_user)
-                continue
-
-            agent_response = agent_response_text
-            if agent_response.startswith("[HANDOFF]"):
-                handoff_message_from_gemini = agent_response.replace("[HANDOFF]", "").strip()
-                if handoff_message_from_gemini:
-                    full_handoff_message = f"Agent (ARTEX): {handoff_message_from_gemini} Je vais vous mettre en relation avec un conseiller humain. Veuillez patienter."
-                else:
-                    full_handoff_message = "Agent (ARTEX): Je comprends. Pour vous aider au mieux, je vais vous mettre en relation avec un conseiller humain. Veuillez patienter un instant."
-                print(full_handoff_message)
-                speak_french(full_handoff_message)
-                print("Conversation terminée après proposition de transfert.")
-                break
-
-            elif agent_response.startswith("[CLARIFY]"):
-                clarification_question = agent_response.replace("[CLARIFY]", "").strip()
-                clarification_message = f"Agent (ARTEX) a besoin de précisions: {clarification_question}"
-                print(clarification_message)
-                speak_french(clarification_question)
-
-                user_clarification = None
-                current_input_mode_for_clarification = input_mode # Preserve current mode for clarification
-                if livekit_room_instance: # If in LiveKit mode, clarification uses text input
-                     print("Agent (LiveKit - Simulant STT pour clarification): Entrez votre précision:")
-                     user_clarification = input(f"Vous ({args.livekit_identity_cli_prompt if args.livekit_room else 'texte'} - précision): ")
-                elif current_input_mode_for_clarification == "voice":
-                    print("Veuillez fournir votre précision oralement:")
-                    user_clarification = listen_and_transcribe_french()
-                    while not user_clarification:
-                        retry_choice = input("Agent (ARTEX): Problème avec la reconnaissance de votre précision. Taper 'texte' pour saisie manuelle, ou appuyez sur Entrée pour réessayer la voix: ").lower()
-                        if retry_choice == 'texte':
-                            current_input_mode_for_clarification = "text"
-                            print("Agent (ARTEX): Mode de saisie par texte activé pour la précision.")
-                            break
-                        print("Veuillez réessayer votre précision oralement:")
-                        user_clarification = listen_and_transcribe_french()
-
-                if current_input_mode_for_clarification == "text" and not user_clarification: # Handles text mode or switch during voice
-                     user_clarification = input(f"Vous (précision texte): ")
-
-                if user_clarification:
-                    new_prompt_for_gemini = (
-                        f"La question originale de l'utilisateur était : \"{original_user_query}\". "
-                        f"L'assistant (IA) a demandé une précision : \"{clarification_question}\". "
-                        f"L'utilisateur a répondu avec la précision suivante : \"{user_clarification}\". "
-                        "Maintenant, réponds de manière complète à la question originale en tenant compte de cette précision. "
-                        "Si tu ne peux toujours pas répondre ou si c'est trop complexe, utilise [HANDOFF]."
-                    )
-                    print("Agent (ARTEX): ...pense (avec précision)...")
-                    agent_response_after_clarification = generate_response(new_prompt_for_gemini)
-
-                    if agent_response_after_clarification.startswith("[HANDOFF]"):
-                        handoff_message_from_gemini = agent_response_after_clarification.replace("[HANDOFF]", "").strip()
-                        if handoff_message_from_gemini:
-                            full_handoff_message = f"Agent (ARTEX): {handoff_message_from_gemini} Il semble que j'aie encore besoin d'aide pour répondre. Je vous mets en relation avec un conseiller."
-                        else:
-                            full_handoff_message = "Agent (ARTEX): Même avec ces précisions, il serait préférable de parler à un conseiller pour cette situation. Je vous mets en relation."
-                        print(full_handoff_message)
-                        speak_french(full_handoff_message)
-                        print("Conversation terminée après tentative de clarification infructueuse.")
-                        break
-                    elif agent_response_after_clarification.startswith("[CLARIFY]"):
-                        handoff_message = "Agent (ARTEX): J'ai encore besoin de précisions, et pour éviter de vous faire répéter, il serait peut-être mieux de parler directement à un conseiller. Je vous mets en relation."
-                        print(handoff_message)
-                        speak_french(handoff_message)
-                        print("Conversation terminée après clarifications multiples.")
-                        break
-                    else:
-                        print(f"Agent (ARTEX) (texte): {agent_response_after_clarification}")
-                        speak_french(agent_response_after_clarification)
-                else:
-                    no_clarification_message = "Agent (ARTEX): Pas de précision fournie. Veuillez reposer votre question ou demander à parler à un conseiller si vous êtes bloqué."
-                    print(no_clarification_message)
-                    speak_french(no_clarification_message)
+                if final_text.startswith("[HANDOFF]"): print(f"Agent: {final_text}"); speak_text_output(final_text); break
+                elif final_text.startswith("[CLARIFY]"): print(f"Agent: Encore besoin de détails, transfert."); speak_text_output("Transfert conseiller."); break
+                else: print(f"Agent (ARTEX) (texte): {final_text}"); speak_text_output(final_text)
+                current_conversation_history = []
             else:
-                print(f"Agent (ARTEX) (texte): {agent_response}")
-                speak_french(agent_response)
-
-        # ... (rest of the loop, if any, or it ends here for one interaction) ...
-        # except EOFError, ValueError, KeyboardInterrupt, Exception as before
+                no_clar_msg="Agent (ARTEX): Pas de précision."
+                print(no_clar_msg); speak_text_output(no_clar_msg)
+                current_conversation_history = [] # Reset after failed clarification
+        else:
+            print(f"Agent (ARTEX) (texte): {agent_response}"); speak_text_output(agent_response)
+            current_conversation_history.append({'role': 'model', 'parts': [{'text': agent_response}]})
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ARTEX ASSURANCES AI Agent")
     parser.add_argument("--livekit-room", type=str, help="Name of the LiveKit room to join.")
     parser.add_argument("--livekit-identity", type=str, default="artex_agent_poc", help="Participant identity for LiveKit.")
-    parser.add_argument("--livekit-identity-cli-prompt", type=str, default="LiveKit User", help="Prompt name for CLI input when in LiveKit mode.") # For PoC
+    parser.add_argument("--livekit-identity-cli-prompt", type=str, default="LiveKit User", help="Prompt name for CLI input when in LiveKit mode.")
+    parser.add_argument("--mic-index", type=int, default=None, help="Device index of the microphone to use for SpeechRecognition.")
     args = parser.parse_args()
 
     print("Bonjour! Je suis l'assistant IA d'ARTEX ASSURANCES. Comment puis-je vous aider?")
-    print("Bonjour! Je suis l'assistant IA d'ARTEX ASSURANCES. Comment puis-je vous aider?")
     print("==================================================================================")
 
-    global _pygame_mixer_initialized # Allow main to modify this
-
-    # load_dotenv() # Called at the top of the script now
-
+    _pygame_mixer_initialized = False
     try:
-        # Initialize pygame mixer here once
-        try:
-            pygame.mixer.init()
-            _pygame_mixer_initialized = True
-            print("Audio mixer initialisé.") # For debugging
-        except pygame.error as e:
-            print(f"Agent (ARTEX): Attention - Erreur lors de l'initialisation de pygame.mixer: {e}. Les réponses vocales pourraient ne pas fonctionner.")
-            _pygame_mixer_initialized = False # Explicitly set to False
-
-        # Attempt to configure Gemini, which now relies on os.getenv after load_dotenv
-        configure_gemini()
-        # print("Gemini API configured successfully.") # Keep this internal or remove for cleaner UI
-        print("Dites quelque chose (ou tapez 'texte' pour saisie manuelle, 'exit'/'quit' pour terminer).")
-        print("Vous pouvez aussi taper 'texte' pour passer en mode saisie manuelle.")
-
-        input_mode = "voice" # Start with voice input
-
-        while True:
-            user_input = None
-            if input_mode == "voice":
-                transcribed_text = listen_and_transcribe_french()
-                if transcribed_text:
-                    user_input = transcribed_text
-                else:
-                    # Offer to switch to text input if voice fails
-                    choice = input("Agent (ARTEX): Problème avec la reconnaissance vocale. Taper 'texte' pour saisie manuelle, ou appuyez sur Entrée pour réessayer la voix: ").lower()
-                    if choice == 'texte':
-                        input_mode = "text"
-                        print("Agent (ARTEX): Mode de saisie par texte activé.")
-                        continue # Restart loop to get text input
-                    else:
-                        continue # Retry voice input
-
-            if input_mode == "text":
-                user_input = input("Vous (texte): ")
-                if user_input.lower() == 'voix': # Allow switching back to voice
-                    input_mode = "voice"
-                    print("Agent (ARTEX): Mode de saisie vocale activé.")
-                    continue
-
-            if user_input: # Process if we have input (either voice or text)
-                if user_input.lower() in ['exit', 'quit']:
-                    print("Au revoir!")
-                    break
-                if not user_input.strip(): # Should primarily apply to text input now
-                    print("Agent (ARTEX): Veuillez entrer une demande valide.")
-                    continue
-
-                original_user_query = user_input # Store the original query
-
-                print("Agent (ARTEX): ...pense...")
-                agent_response_text = generate_response(original_user_query)
-
-                # Attempt to parse as JSON for DB operations
-                try:
-                    # Gemini might sometimes wrap JSON in ```json ... ```, so try to strip that
-                    if agent_response_text.strip().startswith("```json"):
-                        cleaned_response_text = agent_response_text.strip()
-                        cleaned_response_text = cleaned_response_text.replace("```json", "").replace("```", "").strip()
-                        parsed_action = json.loads(cleaned_response_text)
-                    elif agent_response_text.strip().startswith("{"): # Check if it looks like JSON
-                        parsed_action = json.loads(agent_response_text)
-                    else:
-                        parsed_action = None
-                except json.JSONDecodeError:
-                    parsed_action = None # Not a JSON command
-
-                if parsed_action and "action" in parsed_action:
-                    action_type = parsed_action.get("action")
-                    operation = parsed_action.get("operation")
-                    params = parsed_action.get("params", {})
-
-                    final_agent_response_for_user = "" # This will hold the text Gemini generates after DB op
-
-                    if not db_engine:
-                        error_message = "Désolé, je ne peux pas accéder à la base de données pour le moment en raison d'un problème de configuration."
-                        print(f"Agent (ARTEX) (erreur): {error_message}")
-                        speak_french(error_message)
-                        continue # Go to next iteration of the loop
-
-                    # Handle DB Read Action
-                    if action_type == "db_read" and operation == "get_policy_details":
-                        policy_id = params.get("policy_id")
-                        if policy_id:
-                            print(f"Agent (ARTEX): Recherche des détails de la police {policy_id}...")
-                            try:
-                                policy_data = asyncio.run(database.get_policy_details(db_engine, policy_id))
-                                if policy_data: # Data found
-                                    db_result_prompt = f"L'utilisateur a demandé des informations sur sa police '{policy_id}'. Les données de la base de données sont: {json.dumps(policy_data)}. Formule une réponse concise et informative en français pour l'utilisateur, présentant ces détails de manière claire."
-                                else: # Data not found
-                                    db_result_prompt = f"L'utilisateur a demandé des détails pour la police ID '{policy_id}', mais aucune police correspondante n'a été trouvée dans la base de données. Informe l'utilisateur de cela en français et demande s'il souhaite essayer un autre ID ou obtenir de l'aide pour autre chose."
-                            except Exception as db_e: # Database error
-                                print(f"Erreur lors de l'accès à la base de données pour get_policy_details (policy_id: {policy_id}): {db_e}")
-                                db_result_prompt = f"Une erreur s'est produite lors de la tentative de récupération des détails de la police ID '{policy_id}'. Informe l'utilisateur en français qu'il y a eu un problème technique et suggère de réessayer plus tard ou de contacter le support si le problème persiste."
-                            final_agent_response_for_user = generate_response(db_result_prompt)
-                        else: # policy_id was not provided in params
-                            final_agent_response_for_user = "Je n'ai pas reçu de numéro de police à rechercher. Pourriez-vous me le fournir s'il vous plaît?"
-
-                    # Handle DB Edit Action
-                    elif action_type == "db_edit" and operation == "update_user_preference":
-                        user_id = params.get("user_id")
-                        receive_updates = params.get("receive_updates")
-                        if user_id is not None and isinstance(receive_updates, bool):
-                            print(f"Agent (ARTEX): Mise à jour des préférences pour l'utilisateur {user_id} à {receive_updates}...")
-                            try:
-                                success = asyncio.run(database.update_user_preference(db_engine, user_id, receive_updates))
-                                if success:
-                                    db_result_prompt = f"La préférence de l'utilisateur '{user_id}' pour recevoir des mises à jour par e-mail (receive_updates) a été mise à jour avec succès à la valeur '{receive_updates}'. Confirme cela à l'utilisateur en français de manière claire et positive."
-                                else:
-                                    # This 'else' might be hit if rowcount is 0, meaning user_id not found or value was already set to the new value.
-                                    # The database function itself doesn't distinguish these cases for a simple True/False return.
-                                    # For a more nuanced response, database.py would need to return more specific info.
-                                    db_result_prompt = f"La tentative de mise à jour des préférences e-mail pour l'utilisateur '{user_id}' à la valeur '{receive_updates}' n'a pas pu être confirmée (il se peut que l'utilisateur n'existe pas ou que la préférence était déjà cette valeur). Informe l'utilisateur et demande s'il veut vérifier l'ID utilisateur."
-                            except Exception as db_e: # Technical error during DB operation
-                                print(f"Erreur lors de l'accès à la base de données pour update_user_preference (user_id: {user_id}): {db_e}")
-                                db_result_prompt = f"La tentative de mise à jour des préférences e-mail pour l'utilisateur '{user_id}' a échoué en raison d'un problème technique. Informe l'utilisateur de cet échec en français et suggère de réessayer plus tard."
-                            final_agent_response_for_user = generate_response(db_result_prompt)
-                        else: # user_id or receive_updates missing/invalid
-                            final_agent_response_for_user = "Les informations fournies pour la mise à jour des préférences sont incomplètes ou incorrectes. J'ai besoin d'un ID utilisateur valide et d'un choix clair (oui ou non) pour les mises à jour par e-mail."
-
-                    else: # Unknown DB action or operation
-                        final_agent_response_for_user = "J'ai reçu une instruction pour interagir avec la base de données que je ne reconnais pas. Pourriez-vous reformuler votre demande?"
-
-                    # Output the final response to the user
-                    # Check for HANDOFF/CLARIFY in this secondary response as well.
-                    if final_agent_response_for_user.startswith("[HANDOFF]"):
-                        handoff_msg = final_agent_response_for_user.replace("[HANDOFF]", "").strip() or "Il semble que j'aie besoin de transférer votre demande à un conseiller."
-                        print(f"Agent (ARTEX): {handoff_msg}")
-                        speak_french(handoff_msg)
-                        print("Conversation terminée après tentative d'opération DB.")
-                        break
-                    elif final_agent_response_for_user.startswith("[CLARIFY]"):
-                         # Simplified: if DB action leads to new clarify, treat as handoff for now to avoid complex loop
-                        clarify_msg = final_agent_response_for_user.replace("[CLARIFY]", "").strip()
-                        handoff_msg = f"Agent (ARTEX): Pour mieux vous aider avec cela, il serait préférable de parler à un conseiller. {clarify_msg}"
-                        print(handoff_msg)
-                        speak_french(handoff_msg)
-                        print("Conversation terminée, clarification requise après opération DB.")
-                        break
-                    else:
-                        print(f"Agent (ARTEX) (texte): {final_agent_response_for_user}")
-                        speak_french(final_agent_response_for_user)
-                    continue # End current turn and wait for new user input
-
-                # If not a DB action, proceed with CLARIFY/HANDOFF/normal response logic using original agent_response_text
-                agent_response = agent_response_text
-
-                if agent_response.startswith("[HANDOFF]"):
-                    handoff_message_from_gemini = agent_response.replace("[HANDOFF]", "").strip()
-                    if handoff_message_from_gemini:
-                        full_handoff_message = f"Agent (ARTEX): {handoff_message_from_gemini} Je vais vous mettre en relation avec un conseiller humain. Veuillez patienter."
-                    else:
-                        full_handoff_message = "Agent (ARTEX): Je comprends. Pour vous aider au mieux, je vais vous mettre en relation avec un conseiller humain. Veuillez patienter un instant."
-                    print(full_handoff_message)
-                    speak_french(full_handoff_message)
-                    # For now, we will end the conversation after handoff.
-                    # Future: Implement actual handoff mechanism (e.g., LiveKit call)
-                    print("Conversation terminée après proposition de transfert.")
-                    break # Exit the loop
-
-                elif agent_response.startswith("[CLARIFY]"):
-                    clarification_question = agent_response.replace("[CLARIFY]", "").strip()
-                    clarification_message = f"Agent (ARTEX) a besoin de précisions: {clarification_question}"
-                    print(clarification_message)
-                    speak_french(clarification_question) # Speak only the question part
-
-                    # Get user's clarification
-                    user_clarification = None
-                    if input_mode == "voice":
-                        print("Veuillez fournir votre précision oralement:")
-                        user_clarification = listen_and_transcribe_french()
-                        while not user_clarification: # Loop until valid clarification or switch mode
-                            retry_choice = input("Agent (ARTEX): Problème avec la reconnaissance de votre précision. Taper 'texte' pour saisie manuelle, ou appuyez sur Entrée pour réessayer la voix: ").lower()
-                            if retry_choice == 'texte':
-                                input_mode = "text" # Switch mode for clarification
-                                print("Agent (ARTEX): Mode de saisie par texte activé pour la précision.")
-                                break
-                            print("Veuillez réessayer votre précision oralement:")
-                            user_clarification = listen_and_transcribe_french()
-
-                    if input_mode == "text": # Handles initial text mode or switch during voice clarification
-                        if not user_clarification: # if switched from voice and still no input
-                             user_clarification = input(f"Vous (précision texte): ")
-
-
-                    if user_clarification:
-                        new_prompt_for_gemini = (
-                            f"La question originale de l'utilisateur était : \"{original_user_query}\". "
-                            f"L'assistant (IA) a demandé une précision : \"{clarification_question}\". "
-                            f"L'utilisateur a répondu avec la précision suivante : \"{user_clarification}\". "
-                            "Maintenant, réponds de manière complète à la question originale en tenant compte de cette précision. "
-                            "Si tu ne peux toujours pas répondre ou si c'est trop complexe, utilise [HANDOFF]."
-                        )
-                        print("Agent (ARTEX): ...pense (avec précision)...")
-                        agent_response_after_clarification = generate_response(new_prompt_for_gemini)
-
-                        if agent_response_after_clarification.startswith("[HANDOFF]"):
-                            handoff_message_from_gemini = agent_response_after_clarification.replace("[HANDOFF]", "").strip()
-                            if handoff_message_from_gemini:
-                                full_handoff_message = f"Agent (ARTEX): {handoff_message_from_gemini} Il semble que j'aie encore besoin d'aide pour répondre. Je vous mets en relation avec un conseiller."
-                            else:
-                                full_handoff_message = "Agent (ARTEX): Même avec ces précisions, il serait préférable de parler à un conseiller pour cette situation. Je vous mets en relation."
-                            print(full_handoff_message)
-                            speak_french(full_handoff_message)
-                            print("Conversation terminée après tentative de clarification infructueuse.")
-                            break # Exit the loop
-                        elif agent_response_after_clarification.startswith("[CLARIFY]"):
-                            # Gemini still needs clarification - treat as handoff
-                            handoff_message = "Agent (ARTEX): J'ai encore besoin de précisions, et pour éviter de vous faire répéter, il serait peut-être mieux de parler directement à un conseiller. Je vous mets en relation."
-                            print(handoff_message)
-                            speak_french(handoff_message)
-                            print("Conversation terminée après clarifications multiples.")
-                            break # Exit the loop
-                        else:
-                            # Successful response after clarification
-                            print(f"Agent (ARTEX) (texte): {agent_response_after_clarification}")
-                            speak_french(agent_response_after_clarification)
-                    else:
-                        no_clarification_message = "Agent (ARTEX): Pas de précision fournie. Veuillez reposer votre question ou demander à parler à un conseiller si vous êtes bloqué."
-                        print(no_clarification_message)
-                        speak_french(no_clarification_message)
-                else:
-                    # Process response as usual if no clarification or handoff needed initially
-                    print(f"Agent (ARTEX) (texte): {agent_response}")
-                    speak_french(agent_response)
-
-            # If voice input failed and user didn't switch to text, user_input might be None.
-            # The loop continues, and listen_and_transcribe_french() will be called again.
-            # If text input is active and user just presses enter, user_input will be empty string.
-
-            except EOFError: # Handle Ctrl+D
-                print("\nAu revoir!")
-                break
-    except ValueError as ve:
-        print(f"Erreur de configuration: {ve}")
-    except KeyboardInterrupt:
-        print("\nAu revoir!")
-    except Exception as e:
-        print(f"Une erreur inattendue est survenue: {e}")
+        configure_services()
+        asyncio.run(main_async_logic())
+    except ValueError as ve: print(f"Erreur de configuration: {ve}")
+    except KeyboardInterrupt: print("\nAu revoir!")
+    except Exception as e: print(f"Une erreur inattendue est survenue: {e}")
     finally:
-        if _pygame_mixer_initialized:
-            pygame.mixer.quit()
-        pygame.quit() # Quit pygame itself
-        print("Application terminée.")
+        if livekit_event_handler_task and not livekit_event_handler_task.done():
+            print("Cancelling LiveKit event handler task..."); livekit_event_handler_task.cancel()
+            try: asyncio.run(asyncio.sleep(0.1))
+            except RuntimeError: pass
+        if livekit_room_instance and livekit_room_instance.connection_state == "connected":
+            print("Disconnecting from LiveKit room..."); asyncio.run(livekit_room_instance.disconnect())
+            print("LiveKit room disconnected.")
+        if livekit_room_service_client:
+            print("Closing LiveKit service client..."); asyncio.run(livekit_room_service_client.close())
+            print("LiveKit service client closed.")
+        if _pygame_mixer_initialized: pygame.mixer.quit()
+        pygame.quit(); print("Application terminée.")
