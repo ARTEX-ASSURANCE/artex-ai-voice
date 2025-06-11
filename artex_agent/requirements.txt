@@ -5,3 +5,7 @@ PyAudio
 gTTS
 pygame
 pytest
+python-dotenv
+aiomysql
+SQLAlchemy
+livekit
