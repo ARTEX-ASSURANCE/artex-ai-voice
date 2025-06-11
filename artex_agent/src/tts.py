@@ -3,6 +3,11 @@ import hashlib
 import asyncio
 from pathlib import Path
 from typing import Optional
+import sys # For standalone test logging
+
+# Import logging configuration
+from .logging_config import get_logger # Assuming it's in the same directory (src)
+log = get_logger(__name__)
 
 # Attempt to import Google Cloud TTS, but make it optional
 try:
@@ -10,12 +15,12 @@ try:
     GOOGLE_TTS_AVAILABLE = True
 except ImportError:
     GOOGLE_TTS_AVAILABLE = False
-    google_tts = None # Ensure it's None if not available for type hints later
+    google_tts = None
 
-from gtts import gTTS as gtts_engine # Renamed to avoid conflict
+from gtts import gTTS as gtts_engine
 
 # Configuration from environment variables
-TTS_CACHE_DIR_STR = os.getenv("TTS_CACHE_DIR", "/tmp/artts_cache") # Default if not set
+TTS_CACHE_DIR_STR = os.getenv("TTS_CACHE_DIR", "/tmp/artts_cache")
 TTS_CACHE_DIR = Path(TTS_CACHE_DIR_STR)
 
 TTS_USE_GOOGLE_CLOUD_STR = os.getenv("TTS_USE_GOOGLE_CLOUD", "true").lower()
@@ -23,7 +28,7 @@ TTS_USE_GOOGLE_CLOUD = TTS_USE_GOOGLE_CLOUD_STR == "true"
 
 TTS_LANG_CODE_GOOGLE = os.getenv("TTS_LANG_CODE", "fr-FR")
 TTS_VOICE_NAME_GOOGLE = os.getenv("TTS_VOICE_NAME", "fr-FR-Standard-D")
-TTS_LANG_CODE_GTTS = "fr" # gTTS uses simple language codes, e.g., 'fr', 'en'
+TTS_LANG_CODE_GTTS = "fr"
 
 class TTSService:
     def __init__(self):
@@ -34,24 +39,24 @@ class TTSService:
             if os.path.exists(google_app_creds):
                 try:
                     self.google_tts_client = google_tts.TextToSpeechAsyncClient()
-                    print("TTS Service: Google Cloud TTS Client initialized successfully.")
+                    log.info("Google Cloud TTS Client initialized successfully.")
                 except Exception as e:
-                    print(f"TTS Service: Failed to initialize Google Cloud TTS Client (credentials set but client failed): {e}. Will fallback to gTTS.")
-                    self.google_tts_client = None # Ensure it's None on failure
+                    log.error("Failed to initialize Google Cloud TTS Client (creds set but client failed). Will fallback to gTTS.", error=str(e), exc_info=True)
+                    self.google_tts_client = None
             else:
-                print(f"TTS Service: GOOGLE_APPLICATION_CREDENTIALS file not found at '{google_app_creds}'. Will fallback to gTTS.")
+                log.warn(f"GOOGLE_APPLICATION_CREDENTIALS file not found.", path=google_app_creds, fallback_to_gtts=True)
                 self.google_tts_client = None
 
         if not self.google_tts_client and TTS_USE_GOOGLE_CLOUD:
-            print(f"TTS Service: Google Cloud TTS was configured to be used, but client could not be initialized. Using gTTS fallback.")
+            log.warn("Google Cloud TTS was configured to be used, but client could not be initialized. Using gTTS fallback.")
         elif not self.google_tts_client:
-             print(f"TTS Service: Using gTTS. (Google TTS Lib Available: {GOOGLE_TTS_AVAILABLE}, Use Google Cloud Flag: {TTS_USE_GOOGLE_CLOUD}, Creds Path Set: {google_app_creds is not None})")
+             log.info("Using gTTS for Text-to-Speech.", google_tts_available=GOOGLE_TTS_AVAILABLE, use_google_cloud_flag=TTS_USE_GOOGLE_CLOUD, creds_path_set=(google_app_creds is not None))
 
         try:
             TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            # print(f"TTS Service: Cache directory is {TTS_CACHE_DIR}")
+            log.info(f"TTS cache directory is {TTS_CACHE_DIR}")
         except Exception as e:
-            print(f"TTS Service: Error creating/accessing cache directory {TTS_CACHE_DIR}: {e}. Caching may fail.")
+            log.error(f"Error creating/accessing cache directory.", cache_dir=str(TTS_CACHE_DIR), error=str(e), exc_info=True)
 
 
     def _generate_filename(self, text: str, voice_params_str: str) -> str:
@@ -62,7 +67,7 @@ class TTSService:
 
     async def _synthesize_google_cloud_tts_internal(self, text: str, filepath: Path) -> bool:
         if not self.google_tts_client:
-            # print("TTS Google Cloud: Client not available for synthesis.") # Already logged at init
+            log.warn("Google Cloud TTS client not available for synthesis.")
             return False
         try:
             input_text_gc = google_tts.types.SynthesisInput(text=text)
@@ -74,34 +79,34 @@ class TTSService:
                 audio_encoding=google_tts.enums.AudioEncoding.MP3
             )
 
-            # print(f"TTS Google Cloud: Requesting synthesis for '{text[:30]}...'")
+            log.debug(f"Requesting Google Cloud TTS synthesis.", text_snippet=text[:30])
             response = await self.google_tts_client.synthesize_speech(
                 request={"input": input_text_gc, "voice": voice_params_gc, "audio_config": audio_config_gc}
             )
             with open(filepath, "wb") as out:
                 out.write(response.audio_content)
-            # print(f"TTS Google Cloud: Audio content written to {filepath}")
+            log.debug(f"Google Cloud TTS audio content written.", path=str(filepath))
             return True
         except Exception as e:
-            print(f"TTS Google Cloud: Error during synthesis for '{text[:30]}...': {e}")
+            log.error(f"Google Cloud TTS synthesis error.", text_snippet=text[:30], error=str(e), exc_info=True)
             if filepath.exists(): filepath.unlink(missing_ok=True)
             return False
 
     def _synthesize_gtts_internal(self, text: str, filepath: Path) -> bool:
         try:
-            # print(f"TTS gTTS: Requesting synthesis for '{text[:30]}...'")
+            log.debug(f"Requesting gTTS synthesis.", text_snippet=text[:30])
             tts = gtts_engine(text=text, lang=TTS_LANG_CODE_GTTS, slow=False)
             tts.save(str(filepath))
-            # print(f"TTS gTTS: Audio content written to {filepath}")
+            log.debug(f"gTTS audio content written.", path=str(filepath))
             return True
         except Exception as e:
-            print(f"TTS gTTS: Error during synthesis for '{text[:30]}...': {e}")
+            log.error(f"gTTS synthesis error.", text_snippet=text[:30], error=str(e), exc_info=True)
             if filepath.exists(): filepath.unlink(missing_ok=True)
             return False
 
     async def get_speech_audio_filepath(self, text: str) -> Optional[str]:
         if not text or not text.strip():
-            print("TTS Service: No text provided to synthesize.")
+            log.warn("No text provided to synthesize.")
             return None
 
         should_try_google = self.google_tts_client and TTS_USE_GOOGLE_CLOUD
@@ -115,44 +120,50 @@ class TTSService:
         filepath = TTS_CACHE_DIR / filename
 
         if filepath.exists():
-            # print(f"TTS Service: Cache hit for '{text[:30]}...' -> {filepath}")
+            log.info(f"TTS cache hit.", text_snippet=text[:30], path=str(filepath))
             return str(filepath)
 
-        # print(f"TTS Service: Cache miss for '{text[:30]}...'. Generating new file: {filepath}")
+        log.info(f"TTS cache miss. Generating new file.", text_snippet=text[:30], path=str(filepath))
 
         success = False
         if should_try_google:
-            # print("TTS Service: Attempting synthesis with Google Cloud TTS.")
+            log.debug("Attempting synthesis with Google Cloud TTS.")
             success = await self._synthesize_google_cloud_tts_internal(text, filepath)
 
         if not success:
             if should_try_google:
-                print("TTS Service: Google Cloud TTS failed or was not used, falling back to gTTS.")
-            # else:
-                # print("TTS Service: Using gTTS for synthesis.") # Avoid too much noise if gTTS is default
+                log.warn("Google Cloud TTS failed or was not used, falling back to gTTS.")
+            else:
+                log.info("Using gTTS for synthesis.")
 
             loop = asyncio.get_event_loop()
             try:
                 success = await loop.run_in_executor(None, self._synthesize_gtts_internal, text, filepath)
             except Exception as e_gtts_exec:
-                print(f"TTS gTTS: Error in executor for gTTS: {e_gtts_exec}")
+                log.error("Error in executor for gTTS.", error=str(e_gtts_exec), exc_info=True)
                 success = False
 
         return str(filepath) if success else None
 
 async def main_test_tts():
     from dotenv import load_dotenv
+
+    # For standalone testing of tts.py, ensure logging is minimally configured if not already by an entry point
+    if not logging.getLogger().handlers:
+        structlog.configure(processors=[structlog.dev.ConsoleRenderer()])
+        logging.basicConfig(level="DEBUG", stream=sys.stdout) # Use stdout for test, stderr for app setup msg
+        log.info("Minimal logging configured for tts.py standalone test.")
+
     dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
     if os.path.exists(dotenv_path):
         load_dotenv(dotenv_path=dotenv_path)
-        print(f"TTS Main Test: Loaded .env from {dotenv_path}")
+        log.info(f"TTS Main Test: Loaded .env from {dotenv_path}")
     else:
-        print(f"TTS Main Test: .env file not found at {dotenv_path}. Relying on existing environment variables.")
+        log.warn(f"TTS Main Test: .env file not found at {dotenv_path}. Relying on existing environment variables.")
 
-    print(f"TTS Main Test Info: GOOGLE_APPLICATION_CREDENTIALS='{os.getenv('GOOGLE_APPLICATION_CREDENTIALS')}'")
-    print(f"TTS Main Test Info: TTS_USE_GOOGLE_CLOUD='{os.getenv('TTS_USE_GOOGLE_CLOUD')}' (Effective: {TTS_USE_GOOGLE_CLOUD})")
-    print(f"TTS Main Test Info: TTS_CACHE_DIR='{TTS_CACHE_DIR_STR}' (Effective: {TTS_CACHE_DIR})")
-
+    log.info(f"TTS Main Test Info: GOOGLE_APPLICATION_CREDENTIALS='{os.getenv('GOOGLE_APPLICATION_CREDENTIALS')}'")
+    log.info(f"TTS Main Test Info: TTS_USE_GOOGLE_CLOUD='{os.getenv('TTS_USE_GOOGLE_CLOUD')}' (Effective: {TTS_USE_GOOGLE_CLOUD})")
+    log.info(f"TTS Main Test Info: TTS_CACHE_DIR='{TTS_CACHE_DIR_STR}' (Effective: {TTS_CACHE_DIR})")
 
     service = TTSService()
 
@@ -162,54 +173,33 @@ async def main_test_tts():
         "Bonjour de l'assistant ARTEX pour le test Google Cloud.",
     ]
 
-    print(f"\n--- Testing TTS Generation ---")
-    print(f"Note: GOOGLE_APPLICATION_CREDENTIALS needs to be valid for Google TTS to work.")
+    log.info(f"--- Testing TTS Generation ---")
+    log.info(f"Note: GOOGLE_APPLICATION_CREDENTIALS needs to be valid for Google TTS to work.")
 
-    # Test 1 (Primary: Google Cloud if configured and available, else gTTS)
-    print(f"\nTest 1: Requesting TTS for: '{texts_to_test[0]}'")
+    log.info(f"Test 1: Requesting TTS for: '{texts_to_test[0]}'")
     path1 = await service.get_speech_audio_filepath(texts_to_test[0])
-    print(f"  MP3 path (Test 1): {path1 if path1 else 'Failed'}")
-    if path1: print(f"  File exists (Test 1): {Path(path1).exists()}")
+    log.info(f"MP3 path (Test 1): {path1 if path1 else 'Failed'}", file_exists=(Path(path1).exists() if path1 else False))
 
-    # Test 2 (Force gTTS by temporarily disabling Google client in a local *test* instance)
-    # This tests the gTTS pathway even if Google Cloud is configured.
-    print(f"\nTest 2: Requesting TTS for: '{texts_to_test[1]}' (Forcing gTTS via temporary client disable for this test call)")
-
-    # Create a temporary service instance or manipulate global flags for testing fallback
-    # For this test, we'll temporarily alter the global flag if needed, then restore.
-    # This is just for testing the gTTS path.
-    original_use_google_cloud_flag = TTS_USE_GOOGLE_CLOUD
-    global TTS_USE_GOOGLE_CLOUD_TEMP_TEST
-    TTS_USE_GOOGLE_CLOUD_TEMP_TEST = False # Local override for this test call
-
-    # Re-evaluate should_try_google based on the temporary override for this specific call
-    # This requires the TTSService to re-evaluate TTS_USE_GOOGLE_CLOUD or pass it.
-    # A cleaner way for testing is to instantiate a new service or pass override to method.
-    # For this test, let's assume we can influence the 'should_try_google' for one call.
-    # The current TTSService structure reads globals at init.
-    # So, to test gTTS fallback, we'd need to ensure self.google_tts_client is None OR TTS_USE_GOOGLE_CLOUD is False.
-
-    # Simpler test for gTTS: instantiate a new service with Google Cloud explicitly disabled for it.
-    temp_tts_use_google_cloud = os.environ.get("TTS_USE_GOOGLE_CLOUD")
-    os.environ["TTS_USE_GOOGLE_CLOUD"] = "false" # Temporarily override env for new instance
-    service_for_gtts_test = TTSService() # This instance will not use Google Cloud
-    os.environ["TTS_USE_GOOGLE_CLOUD"] = temp_tts_use_google_cloud if temp_tts_use_google_cloud is not None else "true" # Restore
+    log.info(f"Test 2: Requesting TTS for: '{texts_to_test[1]}' (Forcing gTTS via temporary client disable for this test call)")
+    temp_tts_use_google_cloud_env = os.environ.get("TTS_USE_GOOGLE_CLOUD")
+    os.environ["TTS_USE_GOOGLE_CLOUD"] = "false"
+    service_for_gtts_test = TTSService()
+    if temp_tts_use_google_cloud_env is None: del os.environ["TTS_USE_GOOGLE_CLOUD"] # Clean up if it wasn't there
+    else: os.environ["TTS_USE_GOOGLE_CLOUD"] = temp_tts_use_google_cloud_env # Restore
 
     path2 = await service_for_gtts_test.get_speech_audio_filepath(texts_to_test[1])
-    print(f"  MP3 path (Test 2 - gTTS forced): {path2 if path2 else 'Failed'}")
-    if path2: print(f"  File exists (Test 2): {Path(path2).exists()}")
+    log.info(f"MP3 path (Test 2 - gTTS forced): {path2 if path2 else 'Failed'}", file_exists=(Path(path2).exists() if path2 else False))
 
-    # Test 3 (Caching - should use Google Cloud if it succeeded in Test 1, using original 'service' instance)
-    print(f"\nTest 3: Requesting cached item: '{texts_to_test[2]}'")
+    log.info(f"Test 3: Requesting cached item: '{texts_to_test[2]}'")
     path3 = await service.get_speech_audio_filepath(texts_to_test[2])
-    print(f"  MP3 path (Test 3 - cached): {path3 if path3 else 'Failed'}")
-    if path3: print(f"  File exists (Test 3): {Path(path3).exists()}")
+    log.info(f"MP3 path (Test 3 - cached): {path3 if path3 else 'Failed'}", file_exists=(Path(path3).exists() if path3 else False))
     if path1 and path3 and path1 == path3:
-        print("  SUCCESS: Test 1 and Test 3 returned the same cached filepath as expected.")
+        log.info("SUCCESS: Test 1 and Test 3 returned the same cached filepath as expected.")
     elif path1 and path3:
-        print(f"  NOTE: Test 1 ({path1}) and Test 3 ({path3}) paths differ. Cache might not have hit as expected (e.g. if voice params changed or first attempt failed).")
+        log.warn("NOTE: Test 1 and Test 3 paths differ. Cache might not have hit as expected.", path1=path1, path3=path3)
 
-    print(f"\nTTS Test finished. Check cache directory ({TTS_CACHE_DIR}) for generated files.")
+    log.info(f"TTS Test finished. Check cache directory ({TTS_CACHE_DIR}) for generated files.")
 
 if __name__ == "__main__":
+    import structlog # Needed for standalone test logging setup
     asyncio.run(main_test_tts())

@@ -1,185 +1,192 @@
 import os
 import asyncio
+import sys # For standalone test logging
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.sql import text
 from sqlalchemy.exc import SQLAlchemyError
 from dotenv import load_dotenv
 
+# Import logging configuration
+from .logging_config import get_logger # Assuming it's in the same directory (src)
+log = get_logger(__name__)
+
 # Load .env file at module level if this script is run directly
-# In the main application (agent.py), load_dotenv() is called at its entry point.
-if __name__ == "__main__" or not os.getenv("GEMINI_API_KEY"): # Simple check if .env might not be loaded
-    load_dotenv()
+# This is important for when this module is run standalone for testing.
+# In the main application (agent.py or main.py), load_dotenv() is called at their entry points.
+if __name__ == "__main__" or not os.getenv("DATABASE_URL"): # Check if DATABASE_URL is missing
+    # This path assumes database.py is in src/ and .env is in project root (artex_agent/)
+    dotenv_path_for_standalone = os.path.join(os.path.dirname(__file__), '..', '.env')
+    if os.path.exists(dotenv_path_for_standalone):
+        load_dotenv(dotenv_path=dotenv_path_for_standalone)
+        # log.debug(f"database.py standalone: Loaded .env from {dotenv_path_for_standalone}")
+    else:
+        # log.debug("database.py standalone: .env file not found for standalone run.")
+        pass
+
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-db_engine_instance = None # Module-level engine instance
+db_engine_instance = None
 
 if not DATABASE_URL:
-    print("CRITICAL: DATABASE_URL environment variable not set. Database functionality will be unavailable.")
-    # db_engine_instance will remain None
+    log.critical("DATABASE_URL environment variable not set. Database functionality will be unavailable.")
 else:
     try:
-        db_engine_instance = create_async_engine(DATABASE_URL, echo=False) # Set echo=True for SQL debugging
-        print(f"Database engine initialized with URL: {DATABASE_URL[:DATABASE_URL.find('@') + 1 if '@' in DATABASE_URL else 30]}...") # Avoid printing full creds
+        # Use echo=True for debugging SQL statements, False for production
+        db_engine_instance = create_async_engine(DATABASE_URL, echo=os.getenv("DB_ECHO", "false").lower() == "true")
+        # Mask credentials in log output
+        url_to_log = DATABASE_URL
+        if "@" in DATABASE_URL:
+            url_to_log = DATABASE_URL.split("@")[0].split("://")[0] + "://********@" + DATABASE_URL.split("@")[1]
+        log.info(f"Database engine initialized.", db_url_masked=url_to_log)
     except Exception as e:
-        print(f"CRITICAL: Failed to create database engine: {e}")
+        log.critical(f"Failed to create database engine.", error=str(e), exc_info=True)
         # db_engine_instance will remain None
 
 AsyncSessionFactory = None
 if db_engine_instance:
     AsyncSessionFactory = async_sessionmaker(
         bind=db_engine_instance,
-        expire_on_commit=False, # Common for async, prevents attributes being expired after commit
+        expire_on_commit=False,
         class_=AsyncSession
     )
-    print("AsyncSessionFactory created.")
+    log.info("AsyncSessionFactory created successfully.")
 else:
-    print("AsyncSessionFactory not created because database engine initialization failed.")
+    log.warn("AsyncSessionFactory not created because database engine initialization failed.")
 
-# Function to get a DB session (used by repositories or service layer)
-async def get_db_session() -> AsyncSession:
+
+async def get_db_session() -> AsyncGenerator[AsyncSession, None]: # Corrected return type hint
     if not AsyncSessionFactory:
+        log.error("Database session factory not configured. Cannot yield session.")
+        # This situation should ideally be prevented by checks at application startup.
+        # Raising an exception here might be too disruptive if called without prior checks.
+        # Consider how the application should behave if the DB is unavailable.
+        # For now, let it raise if called when not configured.
         raise Exception("Database session factory not configured. Check DATABASE_URL and engine initialization.")
-    async with AsyncSessionFactory() as session:
-        try:
-            yield session
-            await session.commit() # Commit at the end of a successful session block
-        except SQLAlchemyError as e:
-            await session.rollback()
-            print(f"Database transaction rolled back due to: {e}")
-            raise # Re-raise the exception to be handled by the caller
-        except Exception as e:
-            await session.rollback()
-            print(f"An unexpected error occurred in get_db_session: {e}")
-            raise
-        finally:
-            await session.close() # Ensure session is closed
 
-# --- Repository-dependent functions (These were using direct engine access, now should use session) ---
-# Refactoring these to use AsyncSession from the factory.
-# The actual repository methods will handle the session.
-# These functions below were examples and will be effectively replaced by repository calls.
+    session: Optional[AsyncSession] = None
+    try:
+        session = AsyncSessionFactory()
+        log.debug("Database session yielded from factory.", session_id=str(session)[-4:]) # Log snippet of session ID
+        yield session
+        await session.commit()
+        log.debug("Database session committed successfully.", session_id=str(session)[-4:])
+    except SQLAlchemyError as e:
+        log.error("Database transaction rolled back due to SQLAlchemyError.", error=str(e), exc_info=True, session_id=str(session)[-4:])
+        if session: await session.rollback()
+        raise
+    except Exception as e:
+        log.error("An unexpected error occurred in get_db_session; transaction rolled back.", error=str(e), exc_info=True, session_id=str(session)[-4:])
+        if session: await session.rollback()
+        raise
+    finally:
+        if session:
+            await session.close()
+            log.debug("Database session closed.", session_id=str(session)[-4:])
 
-async def get_policy_details_direct(session: AsyncSession, policy_id: str) -> dict | None:
-    """
-    Retrieves policy details for a given policy_id using a provided session.
-    This is an example of how a repository method would use the session.
-    """
-    query = text("""
-        SELECT policy_id, user_id, policy_type, start_date, end_date, premium_amount, status
-        FROM policies
-        WHERE policy_id = :policy_id
-    """)
+
+# Example direct DB functions (now using session, for testing or simple tasks)
+# These would typically be replaced by full repository methods for application logic.
+async def get_policy_details_direct(session: AsyncSession, policy_id: str) -> Optional[dict]:
+    log.debug("Executing get_policy_details_direct", policy_id=policy_id)
+    query = text("SELECT policy_id, user_id, policy_type, start_date, end_date, premium_amount, status FROM policies WHERE policy_id = :policy_id")
     try:
         result = await session.execute(query, {"policy_id": policy_id})
         row = result.fetchone()
-        if row:
-            return dict(row._mapping)
-        return None
+        return dict(row._mapping) if row else None
     except SQLAlchemyError as e:
-        print(f"Error fetching policy details for {policy_id}: {e}")
+        log.error(f"Error fetching policy details directly.", policy_id=policy_id, error=str(e), exc_info=True)
         return None
 
 async def update_user_preference_direct(session: AsyncSession, user_id: str, receive_updates: bool) -> bool:
-    """
-    Updates a user's preference using a provided session.
-    Example of how a repository method would use the session.
-    """
-    query = text("""
-        INSERT INTO user_preferences (user_id, receive_email_updates)
-        VALUES (:user_id, :receive_updates)
-        ON DUPLICATE KEY UPDATE receive_email_updates = :receive_updates;
-    """)
+    log.debug("Executing update_user_preference_direct", user_id=user_id, receive_updates=receive_updates)
+    query = text("INSERT INTO user_preferences (user_id, receive_email_updates) VALUES (:user_id, :receive_updates) ON DUPLICATE KEY UPDATE receive_email_updates = :receive_updates;")
     try:
         result = await session.execute(query, {"user_id": user_id, "receive_updates": receive_updates})
-        # No explicit commit here, `get_db_session` handles it.
+        # session commit is handled by get_db_session context manager
         return result.rowcount > 0
     except SQLAlchemyError as e:
-        print(f"Error updating user preference for {user_id}: {e}")
+        log.error(f"Error updating user preference directly.", user_id=user_id, error=str(e), exc_info=True)
         return False
 
-# --- Test functions ---
-
+# --- Main Test Runner for standalone execution ---
 async def main_test_runner():
-    """Main async runner for all tests, using the session factory."""
-    print("\n--- Testing Database Module with Session Factory ---")
+    log = get_logger("db_test_runner") # Specific logger for test runner
+    log.info("--- Testing Database Module with Session Factory ---")
+
     if not AsyncSessionFactory:
-        print("Database not configured (AsyncSessionFactory is None). Cannot run tests.")
+        log.error("Database not configured (AsyncSessionFactory is None). Cannot run tests.")
         return
 
-    async with AsyncSessionFactory() as session: # Get a session from the factory
-        # Test 1: Basic connection test using the new session
-        try:
-            print("\nTesting basic SELECT 1 with new session...")
-            result = await session.execute(text("SELECT 1"))
-            scalar_one = result.scalar_one()
-            print(f"SUCCESS: Direct SELECT 1 result: {scalar_one}")
-        except Exception as e:
-            print(f"FAILURE: Basic SELECT 1 test failed: {e}")
-            return # Stop further tests if basic connection fails
+    # Test 1: Basic connection test using a new session
+    try:
+        log.info("Testing basic SELECT 1 with new session...")
+        async with AsyncSessionFactory() as session: # Using factory directly for test isolation
+            async with session.begin(): # Explicit transaction for the test query
+                 result = await session.execute(text("SELECT 1"))
+                 scalar_one = result.scalar_one()
+                 log.info("SUCCESS: Direct SELECT 1 result.", result=scalar_one)
+    except Exception as e:
+        log.error("FAILURE: Basic SELECT 1 test failed.", error=str(e), exc_info=True)
+        return
 
-        # Test 2: Using a refactored/example direct function with session
-        print("\nTesting get_policy_details_direct (example function)...")
-        test_policy_id_exists = "POL123" # Assume this exists in your test DB
-        details = await get_policy_details_direct(session, test_policy_id_exists)
-        if details:
-            print(f"SUCCESS: Policy {test_policy_id_exists} details: {details}")
-        else:
-            print(f"INFO: Policy {test_policy_id_exists} not found (or error occurred). This might be expected if DB is not pre-populated.")
+    # Test 2: Using example direct function with session
+    log.info("Testing get_policy_details_direct (example function)...")
+    test_policy_id_exists = "POL123"
+    try:
+        async with AsyncSessionFactory() as session:
+            async with session.begin(): # Each test part gets its own transaction
+                details = await get_policy_details_direct(session, test_policy_id_exists)
+                if details:
+                    log.info(f"SUCCESS: Policy details found.", policy_id=test_policy_id_exists, details=details)
+                else:
+                    log.info(f"INFO: Policy not found (or error occurred). This might be expected if DB is not pre-populated.", policy_id=test_policy_id_exists)
+    except Exception as e:
+        log.error(f"Error testing get_policy_details_direct.", policy_id=test_policy_id_exists, error=str(e), exc_info=True)
 
-        # Test 3: Example of using a repository (if repositories are in a separate file)
-        # For this test, we'll assume database_repositories.py is available
-        # and its classes take an AsyncSession.
-        try:
-            from .database_repositories import ClientRepository, UserPreferenceRepository # Local import for testing
+    # Test 3: Example of using a repository
+    try:
+        from .database_repositories import AdherentRepository, UserPreferenceRepository # Changed from ClientRepository
 
-            print("\nTesting ClientRepository.list_clients...")
-            client_repo = ClientRepository(session)
-            clients = await client_repo.list_clients(limit=2)
-            if clients is not None: # list_clients returns a list, could be empty
-                 print(f"SUCCESS: Found clients via repository (limit 2): {[(c.id, c.client_ref) for c in clients]}")
-            else: # Should not happen unless there's an error in list_clients itself
-                 print(f"FAILURE: client_repo.list_clients returned None")
+        log.info("Testing AdherentRepository.list_adherents...")
+        async with AsyncSessionFactory() as session:
+            async with session.begin():
+                adherent_repo = AdherentRepository(session)
+                adherents = await adherent_repo.list_adherents(limit=2)
+                log.info("SUCCESS: Adherents found via repository (limit 2).", adherents=[(c.id_adherent, c.nom) for c in adherents])
 
+        log.info("Testing UserPreferenceRepository (conceptual, as model was removed)...")
+        # UserPreference model was commented out. If it's re-added, this test can be enabled.
+        # For now, this will likely fail or use a dummy if UserPreferenceRepository is a placeholder.
+        # async with AsyncSessionFactory() as session:
+        #     async with session.begin():
+        #         user_pref_repo = UserPreferenceRepository(session)
+        #         test_user_id = "USER_TEST_DB_PY_001"
+        #         log.info(f"Attempting to set receive_updates to True for {test_user_id}...")
+        #         updated_pref_true = await user_pref_repo.update_user_preference(test_user_id, True)
+        #         # ... (verification logic) ...
+    except ImportError:
+        log.warn("Skipping repository tests: database_repositories.py or specific repositories not found.")
+    except Exception as e:
+        log.error("Error during repository tests.", error=str(e), exc_info=True)
 
-            print("\nTesting UserPreferenceRepository.update_user_preference...")
-            user_pref_repo = UserPreferenceRepository(session)
-            test_user_id = "USER_TEST_001"
+    log.info("--- Database Module Test Finished ---")
 
-            print(f"Attempting to set receive_updates to True for {test_user_id}...")
-            updated_pref_true = await user_pref_repo.update_user_preference(test_user_id, True)
-            if updated_pref_true and updated_pref_true.receive_email_updates is True:
-                print(f"SUCCESS & VERIFIED: Preference for {test_user_id} set to True: ID {updated_pref_true.id}, Value: {updated_pref_true.receive_email_updates}")
-            else:
-                print(f"FAILURE or VERIFICATION FAILED for setting True. Result: {updated_pref_true}")
-
-            print(f"Attempting to set receive_updates to False for {test_user_id}...")
-            updated_pref_false = await user_pref_repo.update_user_preference(test_user_id, False)
-            if updated_pref_false and updated_pref_false.receive_email_updates is False:
-                print(f"SUCCESS & VERIFIED: Preference for {test_user_id} set to False: ID {updated_pref_false.id}, Value: {updated_pref_false.receive_email_updates}")
-            else:
-                print(f"FAILURE or VERIFICATION FAILED for setting False. Result: {updated_pref_false}")
-
-        except ImportError:
-            print("\nSkipping repository tests: database_repositories.py not found (ensure it's in the same directory or adjust path).")
-        except Exception as e:
-            print(f"\nError during repository tests: {e}")
-
-        # Note: The main_test_runner now implicitly tests commit/rollback via get_db_session
-        # if it were used by the repository methods. Since repositories manage their own session
-        # passed to them, they should call session.commit() or session.rollback() as appropriate.
-        # The `get_db_session` provided here is a good pattern for service layer functions that
-        # want to ensure a transaction block. For repositories, passing the session is fine.
-        # The test runner uses AsyncSessionFactory directly here.
 
 if __name__ == "__main__":
-    # `load_dotenv()` is called at the top if this script is run directly.
+    # Minimal logging setup for standalone execution if logging_config.py wasn't imported by an entry point
+    if not logging.getLogger().handlers or not structlog.is_configured():
+        import logging # Re-import for basicConfig
+        import structlog
+        structlog.configure(processors=[structlog.dev.ConsoleRenderer()])
+        logging.basicConfig(level=os.getenv("LOG_LEVEL", "DEBUG").upper(), stream=sys.stdout)
+        log.info("Minimal logging re-configured for database.py standalone test.")
+
     asyncio.run(main_test_runner())
 
-    # Explicitly dispose of the engine when the script finishes, if it was created.
     async def dispose_engine_on_exit():
         if db_engine_instance:
-            print("\nDisposing database engine...")
+            log.info("Disposing database engine from database.py __main__...")
             await db_engine_instance.dispose()
-            print("Database engine disposed.")
+            log.info("Database engine disposed.")
 
     asyncio.run(dispose_engine_on_exit())
