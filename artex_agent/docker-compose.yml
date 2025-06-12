@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: . # Dockerfile is in the project root (artex_agent/)
+      dockerfile: Dockerfile
+    container_name: artex_agent_backend
+    ports:
+      - "8000:8000" # Map host port 8000 to container port 8000
+    env_file:
+      - .env # Load environment variables from .env file
+    depends_on:
+      mysql:
+        condition: service_healthy # Wait for MySQL to be healthy before starting backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s  # How often to run the check
+      timeout: 10s   # How long to wait for a response
+      retries: 3     # How many times to retry before marking as unhealthy
+      start_period: 60s # Grace period for the service to start up before health checks begin
+    restart: unless-stopped # Added a restart policy
+    # volumes: # If needed for live reloading during development with src mounted
+      # - ./src:/app/src
+      # - ./prompts:/app/prompts
+      # This might require dev-specific Dockerfile stage or Uvicorn --reload in CMD
+
+  mysql:
+    image: mysql:8.0 # Using MySQL 8.0
+    container_name: artex_agent_mysql
+    ports:
+      - "3307:3306" # Map host port 3307 to MySQL default port 3306 to avoid conflicts
+                    # Ensure DATABASE_URL in .env for the backend uses 'mysql:3306'
+                    # Developer connects to 3307 from host machine for direct access.
+    environment:
+      # These should align with what's expected by your DATABASE_URL in .env
+      # for the backend service (e.g., using 'mysql' as hostname).
+      # Example: DATABASE_URL=mysql+aiomysql://artuser:artpass@mysql:3306/artex_extranet
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-supersecretrootpassword} # Use from .env or default
+      MYSQL_DATABASE: ${MYSQL_DATABASE_NAME:-artex_extranet}
+      MYSQL_USER: ${MYSQL_USER_NAME:-artuser}
+      MYSQL_PASSWORD: ${MYSQL_USER_PASSWORD:-artpass}
+    volumes:
+      - mysql_data:/var/lib/mysql # Persist MySQL data
+      # To initialize with a schema dump or custom scripts:
+      # - ./path_to_your_init_scripts:/docker-entrypoint-initdb.d
+    healthcheck: # Added basic healthcheck for MySQL
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${MYSQL_USER_NAME:-artuser}", "-p${MYSQL_USER_PASSWORD:-artpass}"] # Test with app user
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s # Give MySQL more time to start up initially
+
+  # Placeholder for nginx if needed later for TLS, reverse proxy, serving static files etc.
+  # nginx:
+  #   image: nginx:latest
+  #   container_name: artex_agent_nginx
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro # Example config
+  #     # - ./certs:/etc/nginx/certs:ro # Example SSL certs
+  #   depends_on:
+  #     - backend
+
+volumes:
+  mysql_data: # Define the named volume for MySQL data persistence
+    driver: local
