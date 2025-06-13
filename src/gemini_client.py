@@ -9,13 +9,13 @@ import sys # For standalone test logging
 from .logging_config import get_logger # Assuming it's in the same directory (src)
 log = get_logger(__name__)
 
-# Attempt to import ARGO_AGENT_TOOLS
+# Attempt to import ARTEX_AGENT_TOOLS
 try:
-    from .gemini_tools import ARGO_AGENT_TOOLS
-    log.debug("ARGO_AGENT_TOOLS imported successfully from .gemini_tools")
+    from .gemini_tools import ARTEX_AGENT_TOOLS
+    log.debug("ARTEX_AGENT_TOOLS imported successfully from .gemini_tools")
 except ImportError:
-    log.warn("ARGO_AGENT_TOOLS could not be imported. Function calling might not work as expected.")
-    ARGO_AGENT_TOOLS = None
+    log.warn("ARTEX_AGENT_TOOLS could not be imported. Function calling might not work as expected.")
+    ARTEX_AGENT_TOOLS = None
 
 MAX_RETRIES = 3
 INITIAL_BACKOFF_SECONDS = 1
@@ -44,7 +44,7 @@ class GeminiClient:
             raise # Re-raise the exception as client cannot function
 
     def _prepare_model(self, tools_list: Optional[List[Tool]] = None) -> genai.GenerativeModel:
-        final_tools = tools_list if tools_list is not None else ARGO_AGENT_TOOLS
+        final_tools = tools_list if tools_list is not None else ARTEX_AGENT_TOOLS
         # log.debug(f"Preparing Gemini model with tools: {final_tools}") # Can be verbose
         return genai.GenerativeModel(
             self.model_name,

@@ -3,9 +3,7 @@ import uuid
 import datetime
 import asyncio
 from typing import Dict, Any, Optional, List, Tuple, AsyncGenerator
-
-# Remove invalid Part import—we'll just work with raw dicts for Gemini parts
-# from google.generativeai.types import FunctionDeclaration, Tool
+from google.generativeai.types import Part # Added Part import
 
 try:
     from .logging_config import get_logger
@@ -164,9 +162,13 @@ class AgentService:
             result = await self._execute_function_call(
                 tool_call.name, dict(tool_call.args)
             )
+            function_response_part = Part.from_function_response(
+                name=tool_call.name,
+                response=result
+            )
             history.append({
-                "role":"function",
-                "parts":[{"name":tool_call.name,"response":result}]
+                "role": "function",
+                "parts": [function_response_part]
             })
             # second turn
             gem_resp2 = await self.gemini_client.generate_text_response(

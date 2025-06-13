@@ -23,7 +23,7 @@ import src.database as database
 from src.database_repositories import ContratRepository, SinistreArthexRepository
 import src.livekit_integration as livekit_integration
 from src.gemini_client import GeminiClient
-from src.gemini_tools import ARGO_AGENT_TOOLS # Used by AgentService, loaded by main.py, direct use here might be removed
+from src.gemini_tools import ARTEX_AGENT_TOOLS # Used by AgentService, loaded by main.py, direct use here might be removed
 from src.asr import ASRService
 from src.tts import TTSService
 from .agent_service import AgentService # Import AgentService
@@ -140,7 +140,7 @@ def configure_services():
             agent_service_instance = AgentService(
                 gemini_client_instance=gemini_chat_client,
                 system_prompt_text=ARTEX_SYSTEM_PROMPT,
-                artex_agent_tools_list=ARGO_AGENT_TOOLS
+                artex_agent_tools_list=ARTEX_AGENT_TOOLS
             )
             log.info("AgentService initialized successfully for CLI.")
         except Exception as e:
