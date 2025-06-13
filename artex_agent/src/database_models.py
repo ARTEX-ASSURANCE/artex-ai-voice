@@ -95,7 +95,7 @@ class SinistreArtex(Base): # Renamed class
     type_sinistre: Mapped[str] = mapped_column(String(255), comment="Type of claim as categorized by Artex or user")
     description_sinistre: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     date_declaration_agent: Mapped[datetime.date] = mapped_column(Date, server_default=func.current_date())
-    statut_sinistre_arthex: Mapped[str] = mapped_column(String(100), server_default="Information enregistrée par agent", default="Information enregistrée par agent") # Field name "statut_sinistre_arthex" can remain if it's just a descriptive string not a direct FK or class name. Let's assume this is fine.
+    statut_sinistre_artex: Mapped[str] = mapped_column(String(100), server_default="Information enregistrée par agent", default="Information enregistrée par agent") # Renamed field for consistency
     date_survenance: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True, comment="Date of incident, if provided by user")
 
     contrat: Mapped["Contrat"] = relationship(back_populates="sinistres_artex") # Updated back_populates target

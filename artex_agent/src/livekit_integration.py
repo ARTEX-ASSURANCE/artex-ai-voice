@@ -82,9 +82,15 @@ def generate_livekit_access_token(
 
 async def join_room_with_token(livekit_url: str, token: str, participant_identity: str) -> Room | None:
     """
-    Connects to a LiveKit room using a pre-generated token.
-    This is the primary way a participant (like our agent) should connect.
+    DEPRECATED PoC FUNCTION (Python Server SDK for Participant Logic)
+    Connects to a LiveKit room using a pre-generated token using the LiveKit Python Server SDK.
+    This was part of the initial PoC for CLI LiveKit mode.
+    Future agent participation should primarily use LiveKitParticipantHandler (gRPC based).
     """
+    # Deprecation warning for runtime, if desired:
+    # import warnings
+    # warnings.warn("join_room_with_token in livekit_integration.py is deprecated for new participant logic. Use LiveKitParticipantHandler.", DeprecationWarning)
+    log.warn("DEPRECATED: join_room_with_token (Python SDK participant logic) called. Consider migrating to LiveKitParticipantHandler.")
     room = Room()
 
     @room.on("participant_connected")
@@ -109,20 +115,36 @@ async def join_room_with_token(livekit_url: str, token: str, participant_identit
 
 async def publish_tts_audio_to_room(room: Room, text_to_speak: str):
     """
-    Placeholder for publishing TTS audio to the LiveKit room.
+    DEPRECATED PoC FUNCTION (Python Server SDK for Participant Logic)
+    Simulates publishing TTS audio to the LiveKit room using a Room object from the Python Server SDK.
+    Used by the CLI LiveKit PoC mode.
+    Future agent participation should use LiveKitParticipantHandler.
     """
+    # Deprecation warning for runtime, if desired:
+    # import warnings
+    # warnings.warn("publish_tts_audio_to_room in livekit_integration.py is deprecated. Use LiveKitParticipantHandler.", DeprecationWarning)
+    log.warn("DEPRECATED: publish_tts_audio_to_room (Python SDK participant logic) called. Consider migrating to LiveKitParticipantHandler.")
+
     if not room or not room.local_participant:
-        log.warn("Cannot publish TTS: Not connected to a room or no local participant.")
+        log.warn("Cannot publish TTS (deprecated PoC): Not connected to a room or no local participant.")
         return
     log.info("LiveKit (Simulated TTS Publish): Publishing audio.", text_snippet=text_to_speak[:30], room_name=room.name, participant_identity=room.local_participant.identity)
     await asyncio.sleep(0.1) # Simulate async work
 
 async def handle_room_events(room: Room):
     """
-    Placeholder for handling room events, especially incoming audio tracks.
+    DEPRECATED PoC FUNCTION (Python Server SDK for Participant Logic)
+    Handles room events using a Room object from the Python Server SDK.
+    Used by the CLI LiveKit PoC mode.
+    Future agent participation should use LiveKitParticipantHandler.
     """
+    # Deprecation warning for runtime, if desired:
+    # import warnings
+    # warnings.warn("handle_room_events in livekit_integration.py is deprecated. Use LiveKitParticipantHandler.", DeprecationWarning)
+    log.warn("DEPRECATED: handle_room_events (Python SDK participant logic) called. Consider migrating to LiveKitParticipantHandler.")
+
     if not room:
-        log.warn("Room object not provided for event handling.")
+        log.warn("Room object not provided for event handling (deprecated PoC).")
         return
     log.info("Setting up event handlers for room.", room_name=room.name, participant_identity=(room.local_participant.identity if room.local_participant else "N/A"))
 

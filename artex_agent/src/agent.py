@@ -22,10 +22,11 @@ import src.database as database
 from src.database_repositories import ContratRepository, SinistreArthexRepository
 import src.livekit_integration as livekit_integration
 from src.gemini_client import GeminiClient
-from src.gemini_tools import ARGO_AGENT_TOOLS
+from src.gemini_tools import ARGO_AGENT_TOOLS # Used by AgentService, loaded by main.py, direct use here might be removed
 from src.asr import ASRService
-from src.tts import TTSService # Import the new TTSService
-from typing import Optional, List, Dict, Any
+from src.tts import TTSService
+from .agent_service import AgentService # Import AgentService
+from typing import Optional, List, Dict, Any, Tuple # Added Tuple
 
 # Load environment variables from .env file at the very beginning
 load_dotenv()
@@ -81,26 +82,53 @@ db_engine = None
 livekit_room_service_client = None
 livekit_room_instance = None
 livekit_event_handler_task = None
-gemini_chat_client: Optional[GeminiClient] = None
+gemini_chat_client: Optional[GeminiClient] = None # This will be used to init AgentService
+agent_service_instance: Optional[AgentService] = None # Global instance for CLI
 asr_service_global: Optional[ASRService] = None
 tts_service_global: Optional[TTSService] = None
 _pygame_mixer_initialized = False
 args = None
 input_mode = "voice"
 
-def configure_services():
-    global db_engine, livekit_room_service_client, gemini_chat_client, asr_service_global, tts_service_global
-    log.info("Configuring services...")
+# CLI specific session/conversation tracking
+cli_session_id = f"cli_session_{uuid.uuid4().hex[:8]}"
+cli_conversation_id: Optional[str] = None
 
+def configure_services():
+    global db_engine, livekit_room_service_client, gemini_chat_client, asr_service_global, tts_service_global, agent_service_instance
+    log.info("Configuring services for CLI agent...")
+
+    # Initialize GeminiClient first as AgentService depends on it
     if gemini_chat_client is None:
         try:
-            gemini_chat_client = GeminiClient()
-            log.info("GeminiClient initialized successfully.")
+            gemini_chat_client = GeminiClient() # Tools are configured inside GeminiClient or passed at call time
+            log.info("GeminiClient initialized successfully for CLI.")
+        except ValueError as ve: # Catch specific API key error from GeminiClient
+            log.critical(f"Failed to initialize GeminiClient: {ve}", exc_info=True)
+            raise SystemExit(f"Erreur critique: {ve}. Vérifiez GEMINI_API_KEY.") # Exit if Gemini can't init
         except Exception as e:
-            log.critical("Failed to initialize GeminiClient.", error=str(e), exc_info=True)
-            raise
+            log.critical("An unexpected error occurred during GeminiClient initialization.", error_str=str(e), exc_info=True)
+            raise SystemExit("Erreur critique inattendue lors de l'initialisation de Gemini.")
 
-    if db_engine is None:
+
+    # Initialize AgentService
+    if agent_service_instance is None and gemini_chat_client:
+        try:
+            # ARTEX_SYSTEM_PROMPT and ARGO_AGENT_TOOLS are loaded at module level
+            agent_service_instance = AgentService(
+                gemini_client_instance=gemini_chat_client,
+                system_prompt_text=ARTEX_SYSTEM_PROMPT,
+                artex_agent_tools_list=ARGO_AGENT_TOOLS
+            )
+            log.info("AgentService initialized successfully for CLI.")
+        except Exception as e:
+            log.critical("Failed to initialize AgentService for CLI.", error_str=str(e), exc_info=True)
+            # Depending on how critical AgentService is, you might raise an error or allow degraded mode
+            # For now, assume it's critical for CLI to function.
+            raise SystemExit("Erreur critique: Impossible d'initialiser AgentService.")
+
+
+    if db_engine is None: # db_engine is used by AgentService's _execute_function_call via AsyncSessionFactory
         if database.db_engine_instance:
             db_engine = database.db_engine_instance
             log.info("Database engine (from database.py) configured successfully.")
@@ -130,30 +158,9 @@ def configure_services():
         except Exception as e:
             log.warn("Failed to initialize TTSService.", error=str(e), exc_info=True)
             tts_service_global = None
-    log.info("Service configuration finished.")
+    log.info("Service configuration finished for CLI.")
 
-
-async def generate_agent_response(
-    conversation_history: List[Dict[str, Any]],
-    tools_list: Optional[List[Tool]] = None
-    ) -> Any:
-    global gemini_chat_client
-    if not gemini_chat_client:
-        log.error("Gemini client not initialized before call to generate_agent_response.")
-        return "Erreur: Le client Gemini n'est pas initialisé. Veuillez redémarrer l'agent."
-
-    final_tools = tools_list if tools_list is not None else ARGO_AGENT_TOOLS
-
-    try:
-        gemini_response_obj = await gemini_chat_client.generate_text_response(
-            prompt_parts=conversation_history,
-            system_instruction=ARTEX_SYSTEM_PROMPT,
-            tools_list=final_tools_list
-        )
-        return gemini_response_obj
-    except Exception as e:
-        log.error("Error in generate_agent_response", error=str(e), exc_info=True)
-        return "Erreur: Impossible d'obtenir une réponse du modèle IA."
+# The old generate_agent_response function is removed as its logic is now in AgentService.
 
 def play_audio_pygame(filepath: str):
     global _pygame_mixer_initialized
@@ -217,9 +224,17 @@ def speak_text_output(text_to_speak: str):
 
 async def main_async_logic():
     global livekit_room_instance, livekit_event_handler_task, input_mode, args
+
+    # --- OLD LiveKit PoC (Python Server SDK as Participant) ---
+    # The following block for LiveKit CLI mode uses functions from livekit_integration.py
+    # (e.g., join_room_and_publish_audio) which are part of an older Proof-of-Concept
+    # that uses the LiveKit Python Server SDK to simulate a participant.
+    # This is DEPRECATED for actual client-side RTC interaction and will be replaced
+    # by using the LiveKitParticipantHandler (gRPC based) in future refactoring
+    # for a more robust LiveKit client implementation.
     if args and args.livekit_room:
         if not livekit_room_service_client:
-            log.error("LiveKit RoomServiceClient not initialized. Cannot join room.")
+            log.error("LiveKit RoomServiceClient not initialized. Cannot join room for OLD PoC mode.")
             return
 
         log.info(f"Attempting to join LiveKit room: {args.livekit_room} as {args.livekit_identity}")
@@ -239,18 +254,23 @@ async def main_async_logic():
     run_cli_conversation_loop()
 
 def run_cli_conversation_loop():
-    global input_mode, args, current_conversation_history
-    log.info("Starting CLI conversation loop.", livekit_mode=(livekit_room_instance is not None))
+    global input_mode, args, agent_service_instance, cli_session_id, cli_conversation_id
+
+    if not agent_service_instance:
+        log.critical("AgentService not initialized. CLI loop cannot function.")
+        print("Erreur critique: Le service agent n'est pas disponible. L'application va se terminer.")
+        return
+
+    log.info("Starting CLI conversation loop.", livekit_mode=(livekit_room_instance is not None), session_id=cli_session_id)
 
     if not livekit_room_instance:
-        # User-facing prints
         print("Dites quelque chose (ou tapez 'texte', 'exit'/'quit').")
         if input_mode == "voice": print("Vous pouvez aussi taper 'texte' pour passer en mode saisie manuelle.")
     else:
-        # User-facing print
         print(f"Mode LiveKit actif. Tapez messages pour '{args.livekit_identity_cli_prompt}'. Tapez 'exit' ou 'quit' pour terminer.")
 
-    current_conversation_history = []
+    # current_conversation_history is now managed by AgentService.
+    # CLI loop only needs to manage the current conversation_id.
 
     while True:
         user_input = None
@@ -305,174 +325,87 @@ def run_cli_conversation_loop():
             log.info("User requested exit."); print("Au revoir!"); break # User-facing
         if not user_input.strip() and not livekit_room_instance:
             log.warn("Empty input received in CLI mode.")
-            print("Agent (ARTEX): Demande vide."); continue # User-facing
+            print("Agent (ARTEX): Demande vide."); continue # User-facing, keep
 
-        log.info("Agent thinking...") # Internal log
-        # User-facing print:
-        print("Agent (ARTEX): ...pense...")
+        log.info("Agent thinking...") # Internal log, keep
+        print("Agent (ARTEX): ...pense...") # User-facing, keep
 
-        if not current_conversation_history or \
-           (current_conversation_history and current_conversation_history[-1]['role'] == 'function'):
-            current_conversation_history.append({'role': 'user', 'parts': [{'text': user_input}]})
-        else: # Overwrite last user message if it wasn't a function sequence (e.g. direct clarification)
-             current_conversation_history = [{'role': 'user', 'parts': [{'text': user_input}]}]
+        # Call AgentService to get the reply
+        agent_response_text, new_cli_conv_id, _ = asyncio.run(
+            agent_service_instance.get_reply(
+                session_id=cli_session_id,
+                user_message=user_input,
+                conversation_id=cli_conversation_id # Pass current conv ID, will be updated
+            )
+        )
+        cli_conversation_id = new_cli_conv_id # Update CLI's conversation ID
 
+        # Handle [CLARIFY] and [HANDOFF] tags from AgentService response
+        if agent_response_text.startswith("[HANDOFF]"):
+            handoff_msg = agent_response_text.replace("[HANDOFF]", "").strip() or "Je vous mets en relation avec un conseiller."
+            print(f"Agent (ARTEX): {handoff_msg}"); speak_text_output(handoff_msg) # User-facing
+            log.info("Conversation ended due to HANDOFF signal from AgentService.", handoff_message=handoff_msg)
+            print("Conversation terminée (handoff)."); break # User-facing
 
-        gemini_response_object = asyncio.run(generate_agent_response(current_conversation_history))
-        agent_response_text = ""; function_call_to_process = None
+        elif agent_response_text.startswith("[CLARIFY]"):
+            clarify_q = agent_response_text.replace("[CLARIFY]", "").strip()
+            print(f"Agent (ARTEX) précisions: {clarify_q}"); speak_text_output(clarify_q) # User-facing
+            log.info("Clarification requested by AgentService.", question=clarify_q)
 
-        if isinstance(gemini_response_object, str): # Error string from generate_agent_response
-            agent_response_text = gemini_response_object
-            log.error("Gemini response was an error string.", error_message=agent_response_text)
-        elif gemini_response_object.candidates and \
-             gemini_response_object.candidates[0].content and \
-             gemini_response_object.candidates[0].content.parts:
-            for part in gemini_response_object.candidates[0].content.parts:
-                if part.function_call:
-                    function_call_to_process = part.function_call
-                    break
-            if not function_call_to_process:
-                agent_response_text = gemini_response_object.text if gemini_response_object.text else "[GEMINI_NO_TEXT]"
-        else:
-            agent_response_text = gemini_response_object.text if hasattr(gemini_response_object, 'text') and gemini_response_object.text else "[GEMINI_EMPTY_CANDIDATE]"
-            log.warn("Received unusual Gemini response object structure.", response_obj_type=type(gemini_response_object).__name__, has_text=hasattr(gemini_response_object, 'text'))
-
-
-        if function_call_to_process:
-            tool_name = function_call_to_process.name
-            tool_args = dict(function_call_to_process.args)
-            log.info("Gemini Function Call triggered.", tool_name=tool_name, tool_args=tool_args)
-            # User-facing DEBUG print, changed to log.debug for internal visibility.
-            # If truly for user, it would be a different format or a specific user debug mode.
-            log.debug("Gemini Function Call details for agent operator.", tool_name=tool_name, tool_args=str(tool_args)) # Convert tool_args to str if it can be complex
-
-            current_conversation_history.append({'role': 'model', 'parts': [Part(function_call=function_call_to_process)]})
-            function_response_content = {"error": f"Outil {tool_name} inconnu ou non implémenté."}
-
-            if not db_engine or not database.AsyncSessionFactory:
-                log.error("Database not configured, cannot execute function call.", tool_name=tool_name)
-                function_response_content = {"error": "DB non configurée."}
-            elif tool_name == "get_contrat_details":
-                numero_contrat = tool_args.get("numero_contrat")
-                if numero_contrat:
-                    log.info("Executing tool: get_contrat_details", numero_contrat=numero_contrat)
-                    async def _get_details():
-                        async with database.AsyncSessionFactory() as session:
-                            repo = ContratRepository(session)
-                            data = await repo.get_contrat_details_for_function_call(numero_contrat)
-                            return data if data else {"error": f"Contrat non trouvé: {numero_contrat}."}
-                    try:
-                        function_response_content = asyncio.run(_get_details())
-                    except Exception as e:
-                        log.error("Error executing get_contrat_details", error=str(e), exc_info=True)
-                        function_response_content = {"error": f"Erreur interne lors de la recherche du contrat {numero_contrat}."}
-                else:
-                    log.warn("Missing 'numero_contrat' for get_contrat_details tool.")
-                    function_response_content = {"error": "Numéro de contrat manquant."}
-            elif tool_name == "open_claim":
-                numero_contrat = tool_args.get("numero_contrat")
-                type_sinistre = tool_args.get("type_sinistre")
-                description_sinistre = tool_args.get("description_sinistre")
-                date_survenance_str = tool_args.get("date_survenance")
-                if numero_contrat and type_sinistre and description_sinistre:
-                    async def _open_claim_op():
-                        async with database.AsyncSessionFactory() as session:
-                            contrat_repo = ContratRepository(session)
-                            contrat = await contrat_repo.get_contrat_by_numero_contrat(numero_contrat)
-                            if contrat and contrat.id_adherent_principal is not None and contrat.id_contrat is not None:
-                                sinistre_repo = SinistreArthexRepository(session)
-                                claim_id_ref_str = f"CLAIM-{uuid.uuid4().hex[:8].upper()}"
-                                sinistre_data = {
-                                    "claim_id_ref": claim_id_ref_str, "id_contrat": contrat.id_contrat,
-                                    "id_adherent": contrat.id_adherent_principal, "type_sinistre": type_sinistre,
-                                    "description_sinistre": description_sinistre,
-                                }
-                                if date_survenance_str:
-                                    try: sinistre_data["date_survenance"] = datetime.date.fromisoformat(date_survenance_str)
-                                    except ValueError: return {"error": f"Format date invalide: '{date_survenance_str}'."}
-                                new_sinistre = await sinistre_repo.create_sinistre_arthex(sinistre_data)
-                                await session.commit()
-                                return {"id_sinistre_arthex": new_sinistre.id_sinistre_arthex, "claim_id_ref": new_sinistre.claim_id_ref, "message": "Déclaration enregistrée."}
-                            return {"error": f"Contrat {numero_contrat} non trouvé."}
-                    try: function_response_content = asyncio.run(_open_claim_op())
-                    except Exception as e:
-                        log.error("Error executing open_claim tool", error_str=str(e), exc_info=True)
-                        function_response_content = {"error": f"Erreur interne ouverture sinistre: {e}"}
-                else:
-                    log.warn("Missing required arguments for open_claim tool.", provided_args=str(tool_args))
-                    function_response_content = {"error": "Infos manquantes pour ouvrir sinistre."}
-
-            current_conversation_history.append({'role': 'function', 'parts': [Part(function_response={"name": tool_name, "response": function_response_content})]})
-            log.info("Agent thinking (after tool execution)...", tool_name=tool_name) # Replaces user-facing print
-            # User-facing print: print(f"Agent (ARTEX): ...pense (après outil {tool_name})...") # Kept for user feedback
-            final_gemini_response_obj = asyncio.run(generate_agent_response(current_conversation_history))
-            if isinstance(final_gemini_response_obj, str): agent_response_text = final_gemini_response_obj
-            elif final_gemini_response_obj.text: agent_response_text = final_gemini_response_obj.text
-            else: agent_response_text = "[GEMINI_NO_TEXT_POST_FUNC]"
-            current_conversation_history = []
-
-        agent_response = agent_response_text
-        if agent_response.startswith("[HANDOFF]"):
-            handoff_msg = agent_response.replace("[HANDOFF]", "").strip() or "Je vous mets en relation avec un conseiller."
-            # User-facing prints, keep:
-            print(f"Agent (ARTEX): {handoff_msg}"); speak_text_output(handoff_msg)
-            log.info("Conversation ended due to HANDOFF signal.", handoff_message=handoff_msg)
-            print("Conversation terminée (handoff)."); break
-        elif agent_response.startswith("[CLARIFY]"):
-            clarify_q = agent_response.replace("[CLARIFY]", "").strip()
-            # User-facing prints, keep:
-            print(f"Agent (ARTEX) précisions: {clarify_q}"); speak_text_output(clarify_q)
-            log.info("Clarification requested by agent.", question=clarify_q)
-            current_conversation_history.append({'role': 'model', 'parts': [{'text': agent_response}]})
-            user_clarification = None; current_clar_mode = input_mode # These are user-facing prompts/interactions
+            user_clarification = None
+            current_clar_mode = input_mode # Store current mode before potentially changing
             if livekit_room_instance:
                  print("Clarification (LiveKit - Sim):"); user_clarification = input(f"Vous ({args.livekit_identity_cli_prompt if args else 'User'} - précision): ")
             elif current_clar_mode == "voice":
                 print("Veuillez fournir votre précision oralement:")
-                async def get_clar_input():
+                async def get_clar_input_clarify():
                     async for text_res in asr_service_global.listen_for_speech(): return text_res
                     return None
-                user_clarification = asyncio.run(get_clar_input())
+                user_clarification = asyncio.run(get_clar_input_clarify())
                 if not user_clarification or user_clarification.startswith("[ASR_"):
                     print("Agent: Non compris. Essayez texte?"); user_clarification = None
             if not user_clarification and (current_clar_mode == "text" or (livekit_room_instance and not user_clarification)):
                  user_clarification = input(f"Vous (précision texte): ")
 
             if user_clarification:
-                log.info("User provided clarification.", clarification_text=user_clarification)
-                current_conversation_history.append({'role': 'user', 'parts': [{'text': user_clarification}]})
-                # User-facing print, keep: print("Agent (ARTEX): ...pense (avec précision)...")
-                log.info("Agent thinking (with clarification)...")
-                clar_response_obj = asyncio.run(generate_agent_response(current_conversation_history))
-                final_text = ""
-                if isinstance(clar_response_obj, str): final_text = clar_response_obj
-                elif clar_response_obj.text: final_text = clar_response_obj.text
-                else: final_text = "[GEMINI_NO_TEXT_POST_CLARIFY]"; log.warn("Gemini returned no text after clarification.")
+                log.info("User provided clarification to CLI.", clarification_text=user_clarification)
+                # Send this clarification back through AgentService
+                print("Agent (ARTEX): ...pense (avec précision)...") # User-facing
+                agent_response_text, new_cli_conv_id, _ = asyncio.run(
+                    agent_service_instance.get_reply(
+                        session_id=cli_session_id,
+                        user_message=user_clarification, # Send clarification as new user message
+                        conversation_id=cli_conversation_id # Continue the same conversation
+                    )
+                )
+                cli_conversation_id = new_cli_conv_id
 
-                if final_text.startswith("[HANDOFF]"):
-                    # User-facing print, keep:
-                    print(f"Agent: {final_text}"); speak_text_output(final_text)
-                    log.info("Conversation ended due to HANDOFF after clarification.", handoff_message=final_text)
+                # Handle response after clarification (could be another clarify, handoff, or final answer)
+                if agent_response_text.startswith("[HANDOFF]"):
+                    handoff_msg_clar = agent_response_text.replace("[HANDOFF]", "").strip() or "Je vous mets en relation."
+                    print(f"Agent (ARTEX): {handoff_msg_clar}"); speak_text_output(handoff_msg_clar)
+                    log.info("HANDOFF after clarification.", message=handoff_msg_clar)
                     break
-                elif final_text.startswith("[CLARIFY]"):
-                    # User-facing print, keep:
-                    print(f"Agent: Encore besoin de détails, transfert."); speak_text_output("Transfert conseiller.")
-                    log.info("Further clarification needed, initiating handoff.", agent_message=final_text)
+                elif agent_response_text.startswith("[CLARIFY]"):
+                    clarify_q_again = agent_response_text.replace("[CLARIFY]", "").strip()
+                    print(f"Agent (ARTEX): Encore besoin de détails: {clarify_q_again}. Transfert conseiller.");
+                    speak_text_output(f"Encore besoin de détails: {clarify_q_again}. Je vous suggère de parler à un conseiller.")
+                    log.info("Further CLARIFY needed, treating as HANDOFF for CLI.", question=clarify_q_again)
                     break
                 else:
-                    # User-facing print, keep:
-                    print(f"Agent (ARTEX) (texte): {final_text}"); speak_text_output(final_text)
-                current_conversation_history = []
-            else:
-                no_clar_msg="Agent (ARTEX): Pas de précision."
-                # User-facing print, keep:
+                    print(f"Agent (ARTEX) (texte): {agent_response_text}"); speak_text_output(agent_response_text)
+            else: # No clarification provided
+                no_clar_msg="Agent (ARTEX): Pas de précision fournie."
                 print(no_clar_msg); speak_text_output(no_clar_msg)
-                log.info("User provided no clarification.")
-                current_conversation_history = []
-        else:
-            # User-facing print, keep:
-            print(f"Agent (ARTEX) (texte): {agent_response}"); speak_text_output(agent_response)
-            current_conversation_history.append({'role': 'model', 'parts': [{'text': agent_response}]})
+                log.info("User provided no clarification in CLI.")
+                # Reset conversation ID if desired, or let AgentService handle history as is
+                # cli_conversation_id = None # Example: force new conversation next time
+        else: # Direct response from AgentService
+            print(f"Agent (ARTEX) (texte): {agent_response_text}"); speak_text_output(agent_response_text)
+
+        # History management is now inside AgentService.
+        # No need for current_conversation_history.append here for the CLI's own tracking,
+        # unless it's used for display purposes not covered by AgentService's returned history (which we ignore with `_`).
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ARTEX ASSURANCES AI Agent")

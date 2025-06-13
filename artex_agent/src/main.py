@@ -43,7 +43,8 @@ from .database import AsyncSessionFactory, db_engine_instance
 from .gemini_client import GeminiClient
 from .api_models import ChatMessageRequest, ChatMessageResponse # Added for chat endpoint
 from .agent_service import AgentService # Added for chat endpoint
-from .agent import ARTEX_SYSTEM_PROMPT, ARGO_AGENT_TOOLS # Import prompt and tools for AgentService
+from .gemini_tools import ARGO_AGENT_TOOLS # Direct import for tools
+from .agent import load_prompt, DEFAULT_SYSTEM_PROMPT # Import loading mechanism and default prompt
 # from livekit import WebhookReceiver # For actual signature verification (if implemented)
 
 # Sentry SDK imports
@@ -61,7 +62,7 @@ except ImportError:
 app = FastAPI(
     title="ARTEX Assurances AI Agent API",
     description="API for interacting with the ARTEX AI Agent and managing related services.",
-    version="0.2.0" # Ensure this aligns with pyproject.toml
+    version="0.2.1" # Aligned with pyproject.toml
 )
 
 # CORS Configuration
@@ -161,20 +162,27 @@ async def startup_event():
         # This log was already issued when SENTRY_SDK_AVAILABLE was set
         pass # log.warn("Sentry SDK is not installed. Sentry integration is disabled.")
 
+    # Load system prompt for AgentService
+    # (load_dotenv() is already called at the top of main.py)
+    loaded_arthex_system_prompt_for_api = load_prompt("system_context.txt", default_prompt=DEFAULT_SYSTEM_PROMPT)
+    if not loaded_arthex_system_prompt_for_api or loaded_arthex_system_prompt_for_api == DEFAULT_SYSTEM_PROMPT:
+        log.warn("AgentService in FastAPI using default system prompt. Check 'system_context.txt' if custom prompt expected.")
+
+
     # Initialize AgentService
-    if gemini_client_instance and ARTEX_SYSTEM_PROMPT and ARGO_AGENT_TOOLS is not None: # ARGO_AGENT_TOOLS can be an empty list
+    if gemini_client_instance: # Only attempt if Gemini client itself initialized
         try:
             app.state.agent_service = AgentService(
                 gemini_client_instance=gemini_client_instance,
-                system_prompt_text=ARTEX_SYSTEM_PROMPT,
-                artex_agent_tools_list=ARGO_AGENT_TOOLS
+                system_prompt_text=loaded_arthex_system_prompt_for_api, # Use directly loaded prompt
+                artex_agent_tools_list=ARGO_AGENT_TOOLS  # Use directly imported tools
             )
             log.info("AgentService initialized and attached to app.state.")
         except Exception as e:
             log.error("Failed to initialize AgentService during startup.", error_str=str(e), exc_info=True)
-            app.state.agent_service = None
+            app.state.agent_service = None # Ensure it's None if init fails
     else:
-        log.error("AgentService could not be initialized due to missing dependencies (GeminiClient, SystemPrompt, or Tools).")
+        log.warn("GeminiClient not available, AgentService will not be initialized.")
         app.state.agent_service = None
 
     log.info("FastAPI startup_event: Service initialization checks complete.")

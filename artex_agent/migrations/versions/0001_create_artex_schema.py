@@ -31,8 +31,7 @@ def upgrade() -> None:
         sa.Column('email', sa.String(length=255), nullable=True),
         sa.Column('numero_securite_sociale', sa.String(length=15), nullable=True),
         sa.Column('date_adhesion_mutuelle', sa.Date(), server_default=sa.text('CURRENT_DATE'), nullable=True),
-        sa.Column('date_creation', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
-        sa.Column('date_modification', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'), nullable=False),
+        # Removed date_creation and date_modification to match model
         sa.PrimaryKeyConstraint('id_adherent', name=op.f('pk_adherents')),
         sa.UniqueConstraint('email', name=op.f('uq_adherents_email')),
         sa.UniqueConstraint('numero_securite_sociale', name=op.f('uq_adherents_numero_securite_sociale'))
@@ -81,8 +80,7 @@ def upgrade() -> None:
         sa.Column('type_contrat', sa.String(length=100), nullable=True),
         sa.Column('statut_contrat', sa.String(length=50), server_default='Actif', nullable=True),
         sa.Column('id_formule', sa.Integer(), nullable=True),
-        sa.Column('date_creation', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
-        sa.Column('date_modification', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'), nullable=False),
+        # Removed date_creation and date_modification to match model
         sa.ForeignKeyConstraint(['id_adherent_principal'], ['adherents.id_adherent'], name=op.f('fk_contrats_id_adherent_principal_adherents')),
         sa.ForeignKeyConstraint(['id_formule'], ['formules.id_formule'], name=op.f('fk_contrats_id_formule_formules')),
         sa.PrimaryKeyConstraint('id_contrat', name=op.f('pk_contrats')),
@@ -98,12 +96,11 @@ def upgrade() -> None:
         sa.Column('type_sinistre', sa.String(length=255), nullable=False),
         sa.Column('description_sinistre', sa.Text(), nullable=True),
         sa.Column('date_declaration_agent', sa.Date(), server_default=sa.text('CURRENT_DATE'), nullable=False),
-        sa.Column('statut_sinistre_arthex', sa.String(length=100), server_default='Information enregistrée par agent', nullable=False), # Column name kept as is
+        sa.Column('statut_sinistre_artex', sa.String(length=100), server_default='Information enregistrée par agent', nullable=False), # Renamed column
         sa.Column('date_survenance', sa.Date(), nullable=True),
-        sa.Column('date_creation', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
-        sa.Column('date_modification', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'), nullable=False),
-        sa.ForeignKeyConstraint(['id_contrat'], ['contrats.id_contrat'], name=op.f('fk_sinistres_artex_id_contrat_contrats')),  # Updated FK constraint name
-        sa.ForeignKeyConstraint(['id_adherent'], ['adherents.id_adherent'], name=op.f('fk_sinistres_artex_id_adherent_adherents')),  # Updated FK constraint name
+        # Removed date_creation and date_modification to match model
+        sa.ForeignKeyConstraint(['id_contrat'], ['contrats.id_contrat'], name=op.f('fk_sinistres_artex_id_contrat_contrats')),
+        sa.ForeignKeyConstraint(['id_adherent'], ['adherents.id_adherent'], name=op.f('fk_sinistres_artex_id_adherent_adherents')),
         sa.PrimaryKeyConstraint('id_sinistre_artex', name=op.f('pk_sinistres_artex'))  # Updated PK constraint name
     )
     # ### end Alembic commands ###
