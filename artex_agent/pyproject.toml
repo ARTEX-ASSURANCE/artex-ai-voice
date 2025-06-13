@@ -54,6 +54,7 @@ dependencies = [
     "structlog==24.2.0",
     "cryptography==42.0.8",
     "pytest==8.2.2",
+    "sentry-sdk[fastapi]==1.40.0", # Added Sentry SDK
 ]
 
 [project.scripts]

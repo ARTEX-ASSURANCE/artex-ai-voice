@@ -34,3 +34,6 @@ cryptography==42.0.8
 
 # Testing
 pytest==8.2.2
+
+# Error Tracking
+sentry-sdk[fastapi]==1.40.0
