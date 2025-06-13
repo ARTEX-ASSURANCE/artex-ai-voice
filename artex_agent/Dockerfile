@@ -6,7 +6,8 @@ FROM python:3.11-slim AS builder
 WORKDIR /opt/venv
 # Create a virtual environment
 RUN python -m venv .
-ENV PATH="/opt/venv/bin:$PATH" # Activate venv
+# Activate venv
+ENV PATH="/opt/venv/bin:$PATH" 
 
 # Install build tools if any C extensions need compilation (e.g., some older PyAudio wheels might)
 # For PyAudio on Debian/Ubuntu based images (like python:slim which is Debian based):

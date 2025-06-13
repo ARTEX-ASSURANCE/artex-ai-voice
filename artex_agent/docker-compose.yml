@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
     container_name: artex_agent_backend
     ports:
-      - "8000:8000" # Map host port 8000 to container port 8000
+      - "8001:8000" # Map host port 8000 to container port 8000
     env_file:
       - .env # Load environment variables from .env file
     depends_on:
@@ -29,7 +29,7 @@ services:
     image: mysql:8.0 # Using MySQL 8.0
     container_name: artex_agent_mysql
     ports:
-      - "3307:3306" # Map host port 3307 to MySQL default port 3306 to avoid conflicts
+      - "3308:3306" # Map host port 3307 to MySQL default port 3306 to avoid conflicts
                     # Ensure DATABASE_URL in .env for the backend uses 'mysql:3306'
                     # Developer connects to 3307 from host machine for direct access.
     environment:
