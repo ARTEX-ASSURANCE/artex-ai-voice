@@ -3,7 +3,7 @@ import uuid
 import datetime
 import asyncio
 from typing import Dict, Any, Optional, List, Tuple, AsyncGenerator
-from google.generativeai.types import Part # Added Part import
+from google.generativeai.types.messages import Part # Added Part import
 
 try:
     from .logging_config import get_logger
