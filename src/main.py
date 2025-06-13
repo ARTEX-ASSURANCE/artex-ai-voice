@@ -43,7 +43,7 @@ from .database import AsyncSessionFactory, db_engine_instance
 from .gemini_client import GeminiClient
 from .api_models import ChatMessageRequest, ChatMessageResponse, TokenUsage # Updated import
 from .agent_service import AgentService # Added for chat endpoint
-from .gemini_tools import ARGO_AGENT_TOOLS # Direct import for tools
+from .gemini_tools import ARTEX_AGENT_TOOLS # Direct import for tools
 from .agent import load_prompt, DEFAULT_SYSTEM_PROMPT # Import loading mechanism and default prompt
 # from livekit import WebhookReceiver # For actual signature verification (if implemented)
 
@@ -175,7 +175,7 @@ async def startup_event():
             app.state.agent_service = AgentService(
                 gemini_client_instance=gemini_client_instance,
                 system_prompt_text=loaded_artex_system_prompt_for_api, # Use renamed variable
-                artex_agent_tools_list=ARGO_AGENT_TOOLS  # Use directly imported tools
+                artex_agent_tools_list=ARTEX_AGENT_TOOLS  # Use directly imported tools
             )
             log.info("AgentService initialized and attached to app.state.")
         except Exception as e:

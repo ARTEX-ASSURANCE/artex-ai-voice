@@ -15,7 +15,6 @@ from dotenv import load_dotenv
 import speech_recognition as sr
 # from gtts import gTTS # gTTS is now used within TTSService
 import pygame
-from google.generativeai.types import Part # Added for constructing tool response parts
 from pathlib import Path # For TTSService path operations
 
 # Local application imports
