@@ -25,6 +25,30 @@ services:
       # - ./prompts:/app/prompts
       # This might require dev-specific Dockerfile stage or Uvicorn --reload in CMD
 
+  frontend:
+    build:
+      context: ./frontend # Path to frontend Dockerfile and source
+      dockerfile: Dockerfile
+    container_name: artex_agent_frontend
+    ports:
+      - "8080:5173" # Map host port 8080 to Vite's default dev server port 5173
+    environment:
+      # This URL is used by the client-side code running in the user's browser.
+      # It needs to point to the backend as accessible from the host machine.
+      # The backend service is mapped to host port 8001.
+      VITE_API_BASE_URL: http://localhost:8001
+    depends_on:
+      - backend # Ensures backend is started before frontend, though not strictly necessary for SPA data fetching
+    restart: unless-stopped
+    # If live reload is needed for frontend development (mounting frontend/src):
+    # volumes:
+    #   - ./frontend/src:/app/src # Mount src for live reload
+    #   - ./frontend/public:/app/public # Mount public for live reload
+    # Note: Ensure Dockerfile copies files to /app and that node_modules isn't overwritten by a volume mount on /app.
+    # A common pattern for node_modules with bind mounts is to also define a named volume for /app/node_modules
+    # to keep them in the container:
+    #   - /app/node_modules
+
   mysql:
     image: mysql:8.0 # Using MySQL 8.0
     container_name: artex_agent_mysql

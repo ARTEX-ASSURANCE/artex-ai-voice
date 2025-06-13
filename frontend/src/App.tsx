@@ -5,7 +5,7 @@ import InputArea from './components/InputArea';
 import { type ChatMessageProps, type MessageSender } from './components/ChatMessage';
 // Removed 'cn' import as it's not used directly in this App.tsx version
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8001";
 
 function App() {
   const [messages, setMessages] = useState<ChatMessageProps[]>([]);
@@ -48,7 +48,7 @@ function App() {
         },
         body: JSON.stringify({
           session_id: sessionId,
-          message: messageText,
+          user_message: messageText, // Changed line
           conversation_id: conversationId,
         }),
       });
