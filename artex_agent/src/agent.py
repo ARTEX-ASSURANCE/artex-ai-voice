@@ -1,8 +1,9 @@
 # Standard library imports
 import os
-import sys # Added import
+import sys
 import asyncio
 import tempfile
+import re # Add this import
 import time
 import json
 import argparse
@@ -45,36 +46,57 @@ DEFAULT_SYSTEM_PROMPT = (
     "Si tu ne peux pas répondre ou si l'utilisateur veut parler à un humain, commence ta réponse par '[HANDOFF]'."
 )
 
+MAX_PROMPT_FILE_SIZE_BYTES = 10 * 1024  # 10KB limit
+PLACEHOLDER_REGEX = re.compile(r"\b(TODO|\.\.\.|lorem ipsum|PLACEHOLDER|FIXME)\b", re.IGNORECASE)
+
 def load_prompt(file_name: str, default_prompt: str = DEFAULT_SYSTEM_PROMPT) -> str:
-    # Assuming agent.py is in artex_agent/src/
-    # So, __file__ is .../artex_agent/src/agent.py
-    # os.path.dirname(__file__) is .../artex_agent/src/
-    # os.path.join(os.path.dirname(__file__), '..', 'prompts') is .../artex_agent/prompts/
     prompt_dir = os.path.join(os.path.dirname(__file__), '..', 'prompts')
     file_path = os.path.join(prompt_dir, file_name)
 
-    # Ensure this print goes to stderr if it's for debugging the loading process itself
-    # print(f"DEBUG: Attempting to load prompt from: {file_path}", file=sys.stderr)
+    # print(f"DEBUG: Attempting to load prompt from: {file_path}", file=sys.stderr) # For debugging this function
 
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read().strip()
-        if not content:
-            print(f"CRITICAL WARNING: Prompt file {file_path} is empty. Using default system prompt.", file=sys.stderr)
-            # In future, use structlog: log.warning("Prompt file empty...", path=file_path)
+        # 1. Check for file existence first
+        if not os.path.exists(file_path):
+            print(f"CRITICAL WARNING: Prompt file {file_path} not found! Using default system prompt. THIS IS A CONFIGURATION ISSUE.", file=sys.stderr)
             return default_prompt
+
+        # 2. Check file size
+        file_size = os.path.getsize(file_path)
+        if file_size > MAX_PROMPT_FILE_SIZE_BYTES:
+            print(f"CRITICAL WARNING: Prompt file {file_path} exceeds size limit ({file_size}b > {MAX_PROMPT_FILE_SIZE_BYTES}b). Using default system prompt.", file=sys.stderr)
+            return default_prompt
+
+        # 3. Read file content (with encoding check)
+        content = ""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+        except UnicodeDecodeError as ude:
+            print(f"CRITICAL WARNING: Prompt file {file_path} has encoding issues (not valid UTF-8): {ude}. Using default system prompt.", file=sys.stderr)
+            return default_prompt
+        except Exception as e_read: # Catch other read errors
+            print(f"ERROR: Error reading prompt file {file_path}: {e_read}. Using default system prompt.", file=sys.stderr)
+            return default_prompt
+
+        # 4. Check if file is empty after stripping
+        if not content:
+            print(f"CRITICAL WARNING: Prompt file {file_path} is empty after stripping whitespace. Using default system prompt.", file=sys.stderr)
+            return default_prompt
+
+        # 5. Check for placeholder tokens
+        if PLACEHOLDER_REGEX.search(content):
+            print(f"CRITICAL WARNING: Prompt file {file_path} appears to contain placeholder tokens (e.g., TODO, ...). Using default system prompt.", file=sys.stderr)
+            return default_prompt
+
         return content
-    except FileNotFoundError:
-        print(f"CRITICAL WARNING: Prompt file {file_path} not found! Using default system prompt. THIS IS A CONFIGURATION ISSUE.", file=sys.stderr)
-        # In future, use structlog: log.critical("Prompt file not found...", path=file_path)
-        return default_prompt
-    except Exception as e:
-        print(f"ERROR: Error loading prompt file {file_path}: {e}. Using default system prompt.", file=sys.stderr)
-        # In future, use structlog: log.error("Error loading prompt file", path=file_path, error=str(e), exc_info=True)
+
+    except Exception as e: # Catch-all for other unexpected errors during checks (e.g., os.path.getsize error)
+        print(f"ERROR: Unexpected error during prompt loading for {file_path}: {e}. Using default system prompt.", file=sys.stderr)
         return default_prompt
 
-# Existing global ARTEX_SYSTEM_PROMPT initialization should be updated to use this:
-ARTEX_SYSTEM_PROMPT = load_prompt("system_context.txt") # Implicitly uses new DEFAULT_SYSTEM_PROMPT
+# Existing global ARTEX_SYSTEM_PROMPT initialization uses the updated load_prompt:
+ARTEX_SYSTEM_PROMPT = load_prompt("system_context.txt")
 # The if not ARTEX_SYSTEM_PROMPT check is removed as load_prompt now always returns a string.
 
 # --- Global Instances ---

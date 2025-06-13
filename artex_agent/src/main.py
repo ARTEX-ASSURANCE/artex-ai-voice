@@ -41,7 +41,7 @@ else:
 # Now import other local modules that might use logging or env vars
 from .database import AsyncSessionFactory, db_engine_instance
 from .gemini_client import GeminiClient
-from .api_models import ChatMessageRequest, ChatMessageResponse # Added for chat endpoint
+from .api_models import ChatMessageRequest, ChatMessageResponse, TokenUsage # Updated import
 from .agent_service import AgentService # Added for chat endpoint
 from .gemini_tools import ARGO_AGENT_TOOLS # Direct import for tools
 from .agent import load_prompt, DEFAULT_SYSTEM_PROMPT # Import loading mechanism and default prompt
@@ -164,8 +164,8 @@ async def startup_event():
 
     # Load system prompt for AgentService
     # (load_dotenv() is already called at the top of main.py)
-    loaded_arthex_system_prompt_for_api = load_prompt("system_context.txt", default_prompt=DEFAULT_SYSTEM_PROMPT)
-    if not loaded_arthex_system_prompt_for_api or loaded_arthex_system_prompt_for_api == DEFAULT_SYSTEM_PROMPT:
+    loaded_artex_system_prompt_for_api = load_prompt("system_context.txt", default_prompt=DEFAULT_SYSTEM_PROMPT) # Renamed variable
+    if not loaded_artex_system_prompt_for_api or loaded_artex_system_prompt_for_api == DEFAULT_SYSTEM_PROMPT: # Use renamed variable
         log.warn("AgentService in FastAPI using default system prompt. Check 'system_context.txt' if custom prompt expected.")
 
 
@@ -174,7 +174,7 @@ async def startup_event():
         try:
             app.state.agent_service = AgentService(
                 gemini_client_instance=gemini_client_instance,
-                system_prompt_text=loaded_arthex_system_prompt_for_api, # Use directly loaded prompt
+                system_prompt_text=loaded_artex_system_prompt_for_api, # Use renamed variable
                 artex_agent_tools_list=ARGO_AGENT_TOOLS  # Use directly imported tools
             )
             log.info("AgentService initialized and attached to app.state.")
@@ -199,37 +199,53 @@ async def shutdown_event():
 
 @app.post("/chat/send_message", response_model=ChatMessageResponse, tags=["Chat"])
 async def send_chat_message(request_data: ChatMessageRequest, request: Request) -> ChatMessageResponse:
-    log.info("Chat message received.", session_id=request_data.session_id, conversation_id=request_data.conversation_id, message_length=len(request_data.message))
+    log.info("Chat message received request",
+             session_id=request_data.session_id,
+             conversation_id=request_data.conversation_id,
+             message_length=len(request_data.user_message), # Use user_message
+             metadata_keys=list(request_data.metadata.keys()) if request_data.metadata else [])
+
+    # Validate for empty user_message
+    if not request_data.user_message or not request_data.user_message.strip():
+        log.warn("Empty user_message received in chat request.", session_id=request_data.session_id)
+        raise HTTPException(status_code=400, detail="user_message cannot be empty.")
 
     agent_service_instance = getattr(request.app.state, "agent_service", None)
-
     if not agent_service_instance:
-        log.error("AgentService not available in /chat/send_message endpoint.")
-        # This error might be caught by the global exception handler, but raising HTTPException is more specific.
+        log.error("AgentService not available in app.state during chat request.")
         raise HTTPException(status_code=503, detail="Service temporarily unavailable. Please try again later.")
 
     try:
-        agent_text_reply, new_conv_id, _ = await agent_service_instance.get_reply(
+        # AgentService.get_reply now returns:
+        # (assistant_text_reply, new_conv_id, updated_history, accumulated_usage_dict)
+        assistant_text_reply, new_conv_id, _, accumulated_usage_dict = await agent_service_instance.get_reply(
             session_id=request_data.session_id,
-            user_message=request_data.message,
-            conversation_id=request_data.conversation_id
+            user_message=request_data.user_message, # Use user_message
+            conversation_id=request_data.conversation_id,
+            request_metadata=request_data.metadata # Pass metadata
         )
 
-        log.info("Agent reply generated for API.", conversation_id=new_conv_id, agent_response_length=len(agent_text_reply))
+        log.info("Agent reply generated for API", conversation_id=new_conv_id, response_length=len(assistant_text_reply), usage=accumulated_usage_dict)
+
+        # Construct TokenUsage Pydantic model from the dict
+        usage_pydantic = TokenUsage(**accumulated_usage_dict)
+
         return ChatMessageResponse(
-            agent_response=agent_text_reply,
-            conversation_id=new_conv_id
-            # debug_info can be added if get_reply is updated to return it
+            assistant_message=assistant_text_reply, # Use assistant_message
+            conversation_id=new_conv_id,
+            usage=usage_pydantic # Pass the Pydantic model instance
+            # debug_info can be added if get_reply returns it
         )
+    except HTTPException: # Re-raise HTTPExceptions from agent_service or validation
+        raise
     except Exception as e:
-        # Log the specific error here before it's caught by the global handler
-        log.error("Error processing chat message in API endpoint /chat/send_message.",
+        log.error("Error processing chat message in API endpoint /chat/send_message",
                   error_str=str(e),
                   session_id=request_data.session_id,
                   conversation_id=request_data.conversation_id,
                   exc_info=True)
-        # Let the global exception handler manage the response format
-        raise # Re-raise for the global handler to catch and return a 500
+        # The global exception handler will catch this and return a generic 500
+        raise HTTPException(status_code=500, detail="An error occurred while processing your message.") # Or just raise e
 
 @app.get("/", tags=["General"]) # Keep existing routes below new additions
 async def read_root() -> Dict[str, str]:
