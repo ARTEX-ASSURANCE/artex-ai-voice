@@ -3,7 +3,7 @@ import uuid
 import datetime
 import asyncio
 from typing import Dict, Any, Optional, List, Tuple, AsyncGenerator
-from google.generativeai.types import Part # Added Part import
+import google.generativeai as genai # Added genai import
 
 try:
     from .logging_config import get_logger
@@ -162,7 +162,7 @@ class AgentService:
             result = await self._execute_function_call(
                 tool_call.name, dict(tool_call.args)
             )
-            function_response_part = Part.from_function_response(
+            function_response_part = genai.types.Part.from_function_response(
                 name=tool_call.name,
                 response=result
             )
