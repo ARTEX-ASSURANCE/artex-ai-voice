@@ -3,14 +3,8 @@ import asyncio
 import datetime # Added for token TTL
 from typing import Optional # Added for type hinting
 
-# For client-side PoC parts (used by deprecated functions but kept for now)
-from livekit import Room, RoomOptions, LocalAudioTrack, AudioSource, Participant
-
-# For server-side management and token generation
-from livekit_api import LiveKitAPI
-from livekit_api.access_token import AccessToken
-from livekit_api.video_grants import VideoGrant # Assuming this path based on AccessToken
-from livekit_api import RoomService # For type hinting the return of lk_api.room
+from livekit import api # For server-side API access
+from livekit import Room, RoomOptions, LocalAudioTrack, AudioSource, Participant # For client PoC parts
 
 # Removed proto_room_service import as create_room is not used in this version of join_room_and_publish_audio
 # from livekit.protocol import room_service as proto_room_service
@@ -38,25 +32,22 @@ def get_livekit_room_service():
         log.error("LIVEKIT_URL, LIVEKIT_API_KEY, or LIVEKIT_API_SECRET missing in environment.")
         raise ValueError("LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET must be set in environment variables.")
 
-    # Transform WSS/WS URL to HTTPS/HTTP for the API client
     transformed_url = livekit_url
     if livekit_url.startswith("wss://"):
         transformed_url = "https://" + livekit_url[6:]
     elif livekit_url.startswith("ws://"):
         transformed_url = "http://" + livekit_url[5:]
-    # If the URL might not have a scheme, a more robust transformation might be needed,
-    # but this handles common ws/wss cases.
 
     try:
-        lk_api = LiveKitAPI( # This now refers to the class from livekit_api
+        lk_api = api.LiveKitAPI(
             url=transformed_url,
             api_key=livekit_api_key,
             api_secret=livekit_api_secret
         )
-        log.info("LiveKitAPI client initialized.", livekit_api_url=transformed_url)
+        log.info("LiveKitAPI client initialized using livekit.api.", livekit_api_url=transformed_url)
         return lk_api.room # This is the RoomService client
     except Exception as e:
-        log.error("Failed to initialize LiveKitAPI client.", error_str=str(e), exc_info=True)
+        log.error("Failed to initialize LiveKitAPI client using livekit.api.", error_str=str(e), exc_info=True)
         raise
 
 def generate_livekit_access_token(
@@ -74,7 +65,7 @@ def generate_livekit_access_token(
         log.error("LIVEKIT_API_KEY or LIVEKIT_API_SECRET not found for token generation.")
         return None
 
-    video_grant = VideoGrant( # Uses VideoGrant from livekit_api.video_grants
+    video_grant = api.VideoGrant( # Using api.VideoGrant
         room=room_name,
         room_join=True,
         can_publish=True,
@@ -82,19 +73,15 @@ def generate_livekit_access_token(
         can_publish_data=True
     )
 
-    access_token = AccessToken(api_key, api_secret) # Uses AccessToken from livekit_api.access_token
-    # Standard AccessToken methods are expected to be similar.
-    # If the new SDK uses builder patterns like .with_identity() or .with_grants(),
-    # this part would need adjustment. Assuming direct attribute assignment or constructor params for now.
+    access_token = api.AccessToken(api_key, api_secret) # Using api.AccessToken
     access_token.identity = participant_identity
     if participant_name:
         access_token.name = participant_name
     if participant_metadata:
         access_token.metadata = participant_metadata
 
-    access_token.grants = video_grant # Corrected: assign the grant object itself
+    access_token.grants = video_grant
     access_token.ttl = datetime.timedelta(hours=ttl_hours)
-
 
     try:
         token_jwt = access_token.to_jwt()
@@ -107,15 +94,12 @@ def generate_livekit_access_token(
 async def join_room_with_token(livekit_url: str, token: str, participant_identity: str) -> Room | None:
     """
     DEPRECATED PoC FUNCTION (Python Server SDK for Participant Logic)
-    Connects to a LiveKit room using a pre-generated token using the LiveKit Python Server SDK.
-    This was part of the initial PoC for CLI LiveKit mode.
-    Future agent participation should primarily use LiveKitParticipantHandler (gRPC based).
     """
     log.warn("DEPRECATED: join_room_with_token (Python SDK participant logic) called. Consider migrating to LiveKitParticipantHandler.")
-    room = Room() # From livekit (client SDK)
+    room = Room()
 
     @room.on("participant_connected")
-    async def on_participant_connected(participant: Participant): # Participant from livekit (client SDK)
+    async def on_participant_connected(participant: Participant):
         log.info("LiveKit: Participant connected.", room_name=room.name, participant_identity=participant.identity, is_local=participant.is_local)
 
     @room.on("disconnected")
@@ -124,7 +108,7 @@ async def join_room_with_token(livekit_url: str, token: str, participant_identit
 
     try:
         log.info("LiveKit: Attempting to connect to room.", room_url_masked=livekit_url.split('?')[0], participant_identity=participant_identity)
-        await room.connect(livekit_url, token, options=RoomOptions(auto_subscribe=True)) # RoomOptions from livekit
+        await room.connect(livekit_url, token, options=RoomOptions(auto_subscribe=True))
         log.info("LiveKit: Successfully connected to room.", room_name=room.name, participant_identity=participant_identity)
         return room
     except Exception as e:
@@ -176,7 +160,7 @@ async def handle_room_events(room: Room):
     finally:
         log.info("Event handler task finished.", room_name=room.name)
 
-async def test_list_rooms_admin(room_service: RoomService): # Updated type hint
+async def test_list_rooms_admin(room_service: api.RoomService): # Updated type hint
     """ Tests listing rooms using RoomService (admin task). """
     if not room_service:
         log.warn("RoomService not initialized for admin test.")
@@ -202,12 +186,10 @@ if __name__ == "__main__":
     dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
     load_dotenv(dotenv_path=dotenv_path)
 
-    # This block is essential for standalone testing to see logs.
-    if not log.handlers or not getattr(log, 'is_configured', False): # Check if structlog is configured
+    if not log.handlers or not getattr(log, 'is_configured', False):
         import logging
-        import structlog # Ensure structlog is imported if not already
+        import structlog
         import sys
-        # Basic structlog configuration for console output
         structlog.configure(
             processors=[
                 structlog.stdlib.add_logger_name,
@@ -220,12 +202,9 @@ if __name__ == "__main__":
             wrapper_class=structlog.stdlib.BoundLogger,
             cache_logger_on_first_use=True,
         )
-        # Basic logging config for non-structlog parts or if structlog fails
         logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), stream=sys.stdout, format="%(message)s")
-        # Re-initialize log with structlog if it was basic logger
-        log = get_logger(__name__) # Ensure log is a structlog logger
+        log = get_logger(__name__)
         log.info("Minimal logging re-configured for livekit_integration.py standalone test (structlog).")
-
 
     log.info("--- Testing LiveKit Token Generation ---")
     test_room_name = "my-test-room-for-token"
@@ -246,7 +225,7 @@ if __name__ == "__main__":
 
     log.info("\n--- Testing LiveKit RoomService (Admin Task - List Rooms) ---")
     async def run_admin_tests():
-        lk_service_client = None # This is now a RoomService client
+        lk_service_client = None
         try:
             lk_service_client = get_livekit_room_service()
             if lk_service_client:
@@ -261,9 +240,5 @@ if __name__ == "__main__":
             log.error(f"Admin Test Configuration Error: {ve}")
         except Exception as e:
             log.critical(f"An unexpected error occurred during LiveKit admin tests.", error_str=str(e), exc_info=True)
-        # Note: The LiveKitAPI client (lk_api from get_livekit_room_service) does not have a close() method.
-        # The underlying HTTP client (e.g., httpx) might be managed internally or via context manager if needed.
-        # For this script, we are not explicitly closing it as the script will exit.
-        # If this were a long-running server, client lifecycle management would be important.
 
     asyncio.run(run_admin_tests())
