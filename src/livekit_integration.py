@@ -2,11 +2,16 @@ import os
 import asyncio
 import datetime # Added for token TTL
 from typing import Optional # Added for type hinting
-from livekit import api
-from livekit import Room, RoomOptions, LocalAudioTrack, AudioSource, Participant # For client PoC parts
-# For server-side token generation, as per user's document reference:
-from livekit.api.access_token import AccessToken
-from livekit.api.video_grants import VideoGrant # Assuming VideoGrant follows a similar pattern
+
+# For client-side PoC parts (used by deprecated functions but kept for now)
+from livekit import Room, RoomOptions, LocalAudioTrack, AudioSource, Participant
+
+# For server-side management and token generation
+from livekit_api import LiveKitAPI
+from livekit_api.access_token import AccessToken
+from livekit_api.video_grants import VideoGrant # Assuming this path based on AccessToken
+from livekit_api import RoomService # For type hinting the return of lk_api.room
+
 # Removed proto_room_service import as create_room is not used in this version of join_room_and_publish_audio
 # from livekit.protocol import room_service as proto_room_service
 from dotenv import load_dotenv
@@ -23,7 +28,7 @@ SAMPLES_PER_FRAME = int(SAMPLE_RATE * FRAME_DURATION_MS / 1000)
 
 def get_livekit_room_service():
     """
-    Creates and returns a LiveKit RoomServiceClient instance using environment variables.
+    Creates and returns a LiveKit RoomService client instance using environment variables.
     """
     livekit_url = os.getenv("LIVEKIT_URL")
     livekit_api_key = os.getenv("LIVEKIT_API_KEY")
@@ -43,11 +48,7 @@ def get_livekit_room_service():
     # but this handles common ws/wss cases.
 
     try:
-        # Note: The LiveKitAPI constructor might expect 'host' or 'url'.
-        # Based on common SDK patterns, 'url' for the HTTP/S endpoint is typical.
-        # The user feedback mentioned 'base_url', but official examples often use 'url' or 'host'.
-        # Let's use 'url' as it's more standard for an HTTP client.
-        lk_api = api.LiveKitAPI(
+        lk_api = LiveKitAPI( # This now refers to the class from livekit_api
             url=transformed_url,
             api_key=livekit_api_key,
             api_secret=livekit_api_secret
@@ -73,7 +74,7 @@ def generate_livekit_access_token(
         log.error("LIVEKIT_API_KEY or LIVEKIT_API_SECRET not found for token generation.")
         return None
 
-    video_grant = VideoGrant(
+    video_grant = VideoGrant( # Uses VideoGrant from livekit_api.video_grants
         room=room_name,
         room_join=True,
         can_publish=True,
@@ -81,15 +82,19 @@ def generate_livekit_access_token(
         can_publish_data=True
     )
 
-    access_token = AccessToken(api_key, api_secret)
+    access_token = AccessToken(api_key, api_secret) # Uses AccessToken from livekit_api.access_token
+    # Standard AccessToken methods are expected to be similar.
+    # If the new SDK uses builder patterns like .with_identity() or .with_grants(),
+    # this part would need adjustment. Assuming direct attribute assignment or constructor params for now.
     access_token.identity = participant_identity
     if participant_name:
         access_token.name = participant_name
     if participant_metadata:
         access_token.metadata = participant_metadata
 
-    access_token.grants = video_grant
+    access_token.grants = video_grant # Corrected: assign the grant object itself
     access_token.ttl = datetime.timedelta(hours=ttl_hours)
+
 
     try:
         token_jwt = access_token.to_jwt()
@@ -106,62 +111,42 @@ async def join_room_with_token(livekit_url: str, token: str, participant_identit
     This was part of the initial PoC for CLI LiveKit mode.
     Future agent participation should primarily use LiveKitParticipantHandler (gRPC based).
     """
-    # Deprecation warning for runtime, if desired:
-    # import warnings
-    # warnings.warn("join_room_with_token in livekit_integration.py is deprecated for new participant logic. Use LiveKitParticipantHandler.", DeprecationWarning)
     log.warn("DEPRECATED: join_room_with_token (Python SDK participant logic) called. Consider migrating to LiveKitParticipantHandler.")
-    room = Room()
+    room = Room() # From livekit (client SDK)
 
     @room.on("participant_connected")
-    async def on_participant_connected(participant: Participant):
+    async def on_participant_connected(participant: Participant): # Participant from livekit (client SDK)
         log.info("LiveKit: Participant connected.", room_name=room.name, participant_identity=participant.identity, is_local=participant.is_local)
 
     @room.on("disconnected")
     async def on_disconnected():
-        log.info("LiveKit: Participant disconnected.", room_name=room.name, participant_identity=participant_identity) # This uses the outer scope identity
+        log.info("LiveKit: Participant disconnected.", room_name=room.name, participant_identity=participant_identity)
 
     try:
         log.info("LiveKit: Attempting to connect to room.", room_url_masked=livekit_url.split('?')[0], participant_identity=participant_identity)
-        await room.connect(livekit_url, token, options=RoomOptions(auto_subscribe=True))
+        await room.connect(livekit_url, token, options=RoomOptions(auto_subscribe=True)) # RoomOptions from livekit
         log.info("LiveKit: Successfully connected to room.", room_name=room.name, participant_identity=participant_identity)
         return room
     except Exception as e:
         log.error("LiveKit: Error connecting to room.", participant_identity=participant_identity, error_str=str(e), exc_info=True)
         return None
 
-
-# ----- Functions below are part of the agent's participant logic, using a connected Room object -----
-
 async def publish_tts_audio_to_room(room: Room, text_to_speak: str):
     """
     DEPRECATED PoC FUNCTION (Python Server SDK for Participant Logic)
-    Simulates publishing TTS audio to the LiveKit room using a Room object from the Python Server SDK.
-    Used by the CLI LiveKit PoC mode.
-    Future agent participation should use LiveKitParticipantHandler.
     """
-    # Deprecation warning for runtime, if desired:
-    # import warnings
-    # warnings.warn("publish_tts_audio_to_room in livekit_integration.py is deprecated. Use LiveKitParticipantHandler.", DeprecationWarning)
     log.warn("DEPRECATED: publish_tts_audio_to_room (Python SDK participant logic) called. Consider migrating to LiveKitParticipantHandler.")
-
     if not room or not room.local_participant:
         log.warn("Cannot publish TTS (deprecated PoC): Not connected to a room or no local participant.")
         return
     log.info("LiveKit (Simulated TTS Publish): Publishing audio.", text_snippet=text_to_speak[:30], room_name=room.name, participant_identity=room.local_participant.identity)
-    await asyncio.sleep(0.1) # Simulate async work
+    await asyncio.sleep(0.1)
 
 async def handle_room_events(room: Room):
     """
     DEPRECATED PoC FUNCTION (Python Server SDK for Participant Logic)
-    Handles room events using a Room object from the Python Server SDK.
-    Used by the CLI LiveKit PoC mode.
-    Future agent participation should use LiveKitParticipantHandler.
     """
-    # Deprecation warning for runtime, if desired:
-    # import warnings
-    # warnings.warn("handle_room_events in livekit_integration.py is deprecated. Use LiveKitParticipantHandler.", DeprecationWarning)
     log.warn("DEPRECATED: handle_room_events (Python SDK participant logic) called. Consider migrating to LiveKitParticipantHandler.")
-
     if not room:
         log.warn("Room object not provided for event handling (deprecated PoC).")
         return
@@ -180,30 +165,28 @@ async def handle_room_events(room: Room):
         log.info("LiveKit: Track unsubscribed.", track_sid=track.sid, participant_identity=participant.identity)
 
     @room.on("participant_disconnected")
-    async def on_participant_disconnected(remote_participant: Participant): # Corrected type hint
+    async def on_participant_disconnected(remote_participant: Participant):
         log.info("LiveKit: Remote participant disconnected.", room_name=room.name, participant_identity=remote_participant.identity)
 
     try:
-        while room.connection_state == "connected": # Check based on Room's actual state property if available
+        while room.connection_state == "connected":
             await asyncio.sleep(1)
     except asyncio.CancelledError:
         log.info("Event handler task cancelled.", room_name=room.name)
     finally:
         log.info("Event handler task finished.", room_name=room.name)
 
-
-# ----- Server-side/Admin test function (can remain for testing RoomServiceClient) -----
-async def test_list_rooms_admin(room_service: api.RoomService): # Updated type hint
-    """ Tests listing rooms using RoomServiceClient (admin task). """
+async def test_list_rooms_admin(room_service: RoomService): # Updated type hint
+    """ Tests listing rooms using RoomService (admin task). """
     if not room_service:
-        log.warn("RoomServiceClient not initialized for admin test.") # Keep log msg generic
-        return False, "RoomServiceClient not initialized."
+        log.warn("RoomService not initialized for admin test.")
+        return False, "RoomService not initialized."
     try:
         log.info("Attempting to list LiveKit rooms (admin)...")
-        list_rooms_result = await room_service.list_rooms() # Assumes list_rooms is still the method
+        list_rooms_result = await room_service.list_rooms()
         rooms_info = []
         if list_rooms_result and list_rooms_result.rooms:
-            for r_obj in list_rooms_result.rooms: # Renamed loop variable
+            for r_obj in list_rooms_result.rooms:
                 rooms_info.append(f"  Room SID: {r_obj.sid}, Name: {r_obj.name}, Num Participants: {r_obj.num_participants}")
             rooms_str = "\n".join(rooms_info)
             log.info("LiveKit admin: Rooms found.", num_rooms=len(rooms_info))
@@ -215,21 +198,34 @@ async def test_list_rooms_admin(room_service: api.RoomService): # Updated type h
         log.error("LiveKit admin connection test (list_rooms) failed.", error_str=str(e), exc_info=True)
         return False, f"LiveKit admin connection test (list_rooms) failed: {e}"
 
-
 if __name__ == "__main__":
-    # Ensure .env is loaded for standalone testing
     dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
     load_dotenv(dotenv_path=dotenv_path)
 
-    # Minimal logging setup for standalone execution if logging_config.py wasn't imported by an entry point
-    # This needs to be done *before* any log calls are made by the module's functions if run directly.
-    if not logging.getLogger().handlers or not structlog.is_configured():
-        import logging # Re-import for basicConfig
-        import structlog # Re-import for structlog
-        import sys # For sys.stdout
-        structlog.configure(processors=[structlog.dev.ConsoleRenderer()])
-        logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), stream=sys.stdout)
-        log.info("Minimal logging re-configured for livekit_integration.py standalone test.")
+    # This block is essential for standalone testing to see logs.
+    if not log.handlers or not getattr(log, 'is_configured', False): # Check if structlog is configured
+        import logging
+        import structlog # Ensure structlog is imported if not already
+        import sys
+        # Basic structlog configuration for console output
+        structlog.configure(
+            processors=[
+                structlog.stdlib.add_logger_name,
+                structlog.stdlib.add_log_level,
+                structlog.processors.StackInfoRenderer(),
+                structlog.dev.set_exc_info,
+                structlog.dev.ConsoleRenderer(),
+            ],
+            logger_factory=structlog.stdlib.LoggerFactory(),
+            wrapper_class=structlog.stdlib.BoundLogger,
+            cache_logger_on_first_use=True,
+        )
+        # Basic logging config for non-structlog parts or if structlog fails
+        logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), stream=sys.stdout, format="%(message)s")
+        # Re-initialize log with structlog if it was basic logger
+        log = get_logger(__name__) # Ensure log is a structlog logger
+        log.info("Minimal logging re-configured for livekit_integration.py standalone test (structlog).")
+
 
     log.info("--- Testing LiveKit Token Generation ---")
     test_room_name = "my-test-room-for-token"
@@ -248,76 +244,26 @@ if __name__ == "__main__":
     else:
         log.error("Failed to generate token in standalone test.")
 
-    log.info("\n--- Testing LiveKit RoomServiceClient (Admin Task - List Rooms) ---")
-    # This part tests the RoomServiceClient for admin tasks like listing rooms.
-    # It's separate from participant connection logic.
+    log.info("\n--- Testing LiveKit RoomService (Admin Task - List Rooms) ---")
     async def run_admin_tests():
-        lk_service_client = None
+        lk_service_client = None # This is now a RoomService client
         try:
-            lk_service_client = get_livekit_room_service() # This will log its own success/failure
+            lk_service_client = get_livekit_room_service()
             if lk_service_client:
                 success, message = await test_list_rooms_admin(lk_service_client)
                 if success:
                     log.info(f"Admin Test Result: SUCCESS - {message}")
                 else:
-                    log.warn(f"Admin Test Result: FAILED - {message}") # Changed to warn as error is logged in func
+                    log.warn(f"Admin Test Result: FAILED - {message}")
             else:
-                log.warn("Skipping admin tests as RoomServiceClient could not be initialized.")
-        except ValueError as ve: # Raised by get_livekit_room_service if config is missing
-            log.error(f"Admin Test Configuration Error: {ve}") # Already logged by get_livekit_room_service
+                log.warn("Skipping admin tests as RoomService client could not be initialized.")
+        except ValueError as ve:
+            log.error(f"Admin Test Configuration Error: {ve}")
         except Exception as e:
             log.critical(f"An unexpected error occurred during LiveKit admin tests.", error_str=str(e), exc_info=True)
-        finally:
-            if lk_service_client:
-                log.info("Closing LiveKit RoomServiceClient (admin test)...")
-                await lk_service_client.close()
-                log.info("LiveKit RoomServiceClient (admin test) closed.")
+        # Note: The LiveKitAPI client (lk_api from get_livekit_room_service) does not have a close() method.
+        # The underlying HTTP client (e.g., httpx) might be managed internally or via context manager if needed.
+        # For this script, we are not explicitly closing it as the script will exit.
+        # If this were a long-running server, client lifecycle management would be important.
 
     asyncio.run(run_admin_tests())
-
-    # Note: The `join_room_and_publish_audio` function (which used RoomServiceClient to get a token
-    # and then Room().connect()) is now superseded by `generate_livekit_access_token` (for token)
-    # and `join_room_with_token` (for Room().connect()).
-    # The agent.py will use `generate_livekit_access_token` from this module (or RoomServiceClient.create_token)
-    # and then `Room().connect()` itself, or a new helper like `join_room_with_token`.
-    # The existing `join_room_and_publish_audio` in agent.py is what handles the participant logic.
-    # This file (livekit_integration.py) should mostly contain server-side SDK interactions and token generation.
-    # The participant-side room connection logic is now primarily in agent.py's main_async_logic.
-    # The PoC functions `publish_tts_audio_to_room` and `handle_room_events` are here because
-    # `agent.py` calls them, assuming they operate on a `Room` object.
-    # This separation is a bit mixed up due to the PoC nature.
-    # Ideally, `livekit_integration.py` = server tasks + token generation.
-    # `livekit_participant_handler.py` = pure client RTC logic (gRPC based).
-    # `agent.py` = orchestrator, using services from above.
-    # The `join_room_and_publish_audio` in this file (if it were kept from previous step) was essentially
-    # a participant action using the server SDK's client features.
-    # The new `generate_livekit_access_token` is a pure server-side action (doesn't connect).
-    # The `join_room_with_token` is a pure participant action (connects).
-    # The `publish_tts_audio_to_room` and `handle_room_events` are participant actions on a connected `Room`.
-    # It seems `agent.py` should directly use `Room().connect()` after getting a token.
-    # The `join_room_and_publish_audio` in `livekit_integration.py` from step 22 was doing this combined step.
-    # It's okay to keep it there if `agent.py` calls it.
-    # The new `generate_livekit_access_token` is a more focused utility.
-    # The subtask asks to add `generate_livekit_access_token` here.
-    # The old `join_room_and_publish_audio` from step 22 is still in agent.py's `main_async_logic`.
-    # This can be confusing. Let's assume the `join_room_and_publish_audio` in `livekit_integration.py`
-    # (from step 22) is the one that `agent.py` uses.
-    # The new `generate_livekit_access_token` is an additional utility in this file.
-    # The `test_livekit_connection` is for admin `RoomServiceClient`.
-    # The PoC participant functions `publish_tts_audio_to_room` and `handle_room_events` are also here
-    # as they are called by `agent.py` and operate on a `Room` object.
-    # This seems fine for now.
-    # The `join_room_and_publish_audio` that was added in subtask 22 to `livekit_integration.py`
-    # will be kept and `agent.py` will continue to use it. The new `generate_livekit_access_token`
-    # is an alternative way to get a token if needed separately.
-    # The current `livekit_integration.py` has `join_room_and_publish_audio` which *includes* token generation.
-    # This is fine. The new function is just a standalone token generator.
-    # The `__main__` block in `livekit_integration.py` should primarily test functions within this file.
-    # The `test_list_rooms_admin` tests `RoomServiceClient`.
-    # The new token function should also be tested here.
-    # The participant-side functions `publish_tts_audio_to_room`, `handle_room_events` are harder to test standalone here
-    # as they require a connected `Room` object.
-    # The `join_room_and_publish_audio` (which returns a Room) could be used to test them, but that's more of an integration test.
-    # The current `if __name__ == "__main__":` tests `list_rooms` and the new token generation. This is good.
-    # The other functions (`join_room_and_publish_audio`, `publish_tts_audio_to_room`, `handle_room_events`) are
-    # primarily for `agent.py` to import and use.
