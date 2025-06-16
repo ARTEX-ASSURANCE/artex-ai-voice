@@ -16,7 +16,8 @@ google-cloud-texttospeech==2.14.0
 pydub==0.25.1
 
 # LiveKit
-livekit==1.0.9 # Server SDK
+livekit==1.0.9 # Client SDK (Corrected Comment)
+livekit-api~=1.5 # Server SDK for management and token generation
 grpcio==1.60.1
 grpcio-tools==1.60.1
 protobuf==4.25.3
