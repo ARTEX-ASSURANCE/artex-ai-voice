@@ -4,7 +4,11 @@ import datetime # Added for token TTL
 from typing import Optional # Added for type hinting
 
 from livekit import api # For server-side API access
-from livekit import Room, RoomOptions, LocalAudioTrack, AudioSource, Participant # For client PoC parts
+from livekit.rtc import Room, RoomOptions # Re-exported at livekit.rtc top-level
+from livekit.rtc.track import LocalAudioTrack
+from livekit.rtc.audio_source import AudioSource
+from livekit.rtc.participant import Participant # For client PoC parts
+from livekit.api.room_service import RoomService
 
 # Removed proto_room_service import as create_room is not used in this version of join_room_and_publish_audio
 # from livekit.protocol import room_service as proto_room_service
