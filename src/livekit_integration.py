@@ -2,9 +2,8 @@ import os
 import asyncio
 import datetime # Added for token TTL
 from typing import Optional # Added for type hinting
-from livekit.api import RoomServiceClient
-from livekit import Room, RoomOptions, LocalAudioTrack, AudioSource, Participant
-from livekit import AccessToken, VideoGrant
+from livekit import api
+from livekit import Room, RoomOptions, LocalAudioTrack, AudioSource, Participant, AccessToken, VideoGrant
 # Removed proto_room_service import as create_room is not used in this version of join_room_and_publish_audio
 # from livekit.protocol import room_service as proto_room_service
 from dotenv import load_dotenv
@@ -28,18 +27,33 @@ def get_livekit_room_service():
     livekit_api_secret = os.getenv("LIVEKIT_API_SECRET")
 
     if not all([livekit_url, livekit_api_key, livekit_api_secret]):
-        # This error will be caught by the caller, no direct log here is strictly needed,
-        # but good for direct invocation.
         log.error("LIVEKIT_URL, LIVEKIT_API_KEY, or LIVEKIT_API_SECRET missing in environment.")
         raise ValueError("LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET must be set in environment variables.")
 
+    # Transform WSS/WS URL to HTTPS/HTTP for the API client
+    transformed_url = livekit_url
+    if livekit_url.startswith("wss://"):
+        transformed_url = "https://" + livekit_url[6:]
+    elif livekit_url.startswith("ws://"):
+        transformed_url = "http://" + livekit_url[5:]
+    # If the URL might not have a scheme, a more robust transformation might be needed,
+    # but this handles common ws/wss cases.
+
     try:
-        room_service = RoomServiceClient(livekit_url, livekit_api_key, livekit_api_secret, keepalive_interval=60.0)
-        log.info("RoomServiceClient initialized.", livekit_url=livekit_url)
-        return room_service
+        # Note: The LiveKitAPI constructor might expect 'host' or 'url'.
+        # Based on common SDK patterns, 'url' for the HTTP/S endpoint is typical.
+        # The user feedback mentioned 'base_url', but official examples often use 'url' or 'host'.
+        # Let's use 'url' as it's more standard for an HTTP client.
+        lk_api = api.LiveKitAPI(
+            url=transformed_url,
+            api_key=livekit_api_key,
+            api_secret=livekit_api_secret
+        )
+        log.info("LiveKitAPI client initialized.", livekit_api_url=transformed_url)
+        return lk_api.room # This is the RoomService client
     except Exception as e:
-        log.error("Failed to initialize RoomServiceClient.", error_str=str(e), exc_info=True)
-        raise # Re-raise to indicate failure
+        log.error("Failed to initialize LiveKitAPI client.", error_str=str(e), exc_info=True)
+        raise
 
 def generate_livekit_access_token(
         room_name: str,
@@ -176,14 +190,14 @@ async def handle_room_events(room: Room):
 
 
 # ----- Server-side/Admin test function (can remain for testing RoomServiceClient) -----
-async def test_list_rooms_admin(room_service: RoomServiceClient):
+async def test_list_rooms_admin(room_service: api.RoomService): # Updated type hint
     """ Tests listing rooms using RoomServiceClient (admin task). """
     if not room_service:
-        log.warn("RoomServiceClient not initialized for admin test.")
+        log.warn("RoomServiceClient not initialized for admin test.") # Keep log msg generic
         return False, "RoomServiceClient not initialized."
     try:
         log.info("Attempting to list LiveKit rooms (admin)...")
-        list_rooms_result = await room_service.list_rooms()
+        list_rooms_result = await room_service.list_rooms() # Assumes list_rooms is still the method
         rooms_info = []
         if list_rooms_result and list_rooms_result.rooms:
             for r_obj in list_rooms_result.rooms: # Renamed loop variable
