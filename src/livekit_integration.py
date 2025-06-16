@@ -2,7 +2,9 @@ import os
 import asyncio
 import datetime # Added for token TTL
 from typing import Optional # Added for type hinting
-from livekit import RoomServiceClient, Room, RoomOptions, LocalAudioTrack, AudioSource, Participant, AccessToken, VideoGrant
+from livekit.api import RoomServiceClient
+from livekit import Room, RoomOptions, LocalAudioTrack, AudioSource, Participant
+from livekit import AccessToken, VideoGrant
 # Removed proto_room_service import as create_room is not used in this version of join_room_and_publish_audio
 # from livekit.protocol import room_service as proto_room_service
 from dotenv import load_dotenv
