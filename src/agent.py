@@ -19,7 +19,7 @@ from pathlib import Path # For TTSService path operations
 
 # Local application imports
 import src.database as database
-from src.database_repositories import ContratRepository, SinistreArthexRepository
+from src.database_repositories import ContratRepository, SinistreArtexRepository
 import src.livekit_integration as livekit_integration
 from src.gemini_client import GeminiClient
 from src.gemini_tools import ARTEX_AGENT_TOOLS # Used by AgentService, loaded by main.py, direct use here might be removed
